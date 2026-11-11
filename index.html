@@ -43,12 +43,19 @@
             </div>
           </div>
         </form>
-        <div id="history-tools" class="history-tools" hidden>
-          <label for="history-select">이전 목록</label>
-          <select id="history-select" disabled></select>
-          <button id="load-history" class="button button-outline" type="button" disabled>이전 목록 불러오기</button>
-        </div>
       </details>
+      <div id="history-tools" class="history-tools" hidden>
+        <div class="history-heading">
+          <label for="history-select">보관된 가격 목록</label>
+          <span id="history-count" class="muted"></span>
+        </div>
+        <div class="history-actions">
+          <select id="history-select" aria-describedby="history-note" disabled></select>
+          <button id="load-history" class="button button-outline" type="button" disabled>선택 목록 다시 사용</button>
+          <a id="download-history" class="button button-outline" download hidden>목록 TXT 받기</a>
+        </div>
+        <p id="history-note" class="muted">목록 저장 시각(한국 시간) · 파일명 · 상품 수로 보관합니다. 다시 불러온 뒤 현재가를 조회하세요. TXT는 보관된 가격 자료입니다.</p>
+      </div>
       <div id="import-errors" class="import-errors" hidden>
         <details open>
           <summary id="import-error-title">확인이 필요한 행</summary>
@@ -81,24 +88,32 @@
         </fieldset>
         <div class="work-actions">
           <button id="check-prices" class="button button-outline" type="button" disabled>현재가 조회</button>
-          <button id="run-prices" class="button button-primary" type="button" disabled>가격 변경 실행</button>
+          <button id="run-prices" class="button button-primary" type="button" disabled>변경 대상만 적용</button>
+          <button id="check-and-run-prices" class="button button-primary" type="button" disabled>조회 후 바로 적용</button>
         </div>
       </div>
-      <p class="help-text">가격 변경 실행을 누르면 입력 가능한 상품을 정상마진 34로 한 건씩 적용하고 자동 저장합니다. 상품별 포털 입력을 사용하면 포털에서 직접 저장하세요.</p>
+      <p class="help-text">할인 판매가를 누르면 금액을 수정할 수 있습니다. 수정 후 현재가를 다시 조회하고 변경 대상만 적용하세요. 조회 후 바로 적용은 조회와 저장을 연속 실행합니다. 이미 적용됐거나 진행 중인 상품은 건너뜁니다. 자동 저장에는 정상마진 34가 적용됩니다. 상품별 포털 입력 후에는 포털에서 직접 저장하세요.</p>
 
       <p id="status-message" class="notice" role="status">저장된 목록을 확인하고 있습니다.</p>
       <p id="error-message" class="notice notice-error" role="alert" hidden></p>
+      <p id="startup-warnings" class="notice" role="status" hidden></p>
 
       <div id="empty-state" class="empty-state" hidden>메모장이나 엑셀 목록을 저장하면 품번과 가격이 여기에 표시됩니다.</div>
       <div id="list-view" hidden>
+        <div id="result-groups" class="result-groups" role="group" aria-label="조회 결과 분류"></div>
         <div class="list-tools">
           <label for="code-filter" class="sr-only">품번 또는 상품명 검색</label>
           <input id="code-filter" type="search" placeholder="품번 또는 상품명 검색">
           <label for="result-filter" class="sr-only">상태별로 보기</label>
           <select id="result-filter">
             <option value="">모든 상태</option>
-            <option value="ready">입력 가능</option>
+            <option value="ready">변경 대상</option>
+            <option value="missing">상품 없음</option>
+            <option value="price_condition">가격 조건 불일치</option>
+            <option value="completed">적용 완료·진행 중</option>
+            <option value="additional">추가 확인</option>
             <option value="already">목표가 일치</option>
+            <option value="pending_change">변경 진행·예정</option>
             <option value="saved">저장 확인</option>
             <option value="review">확인 필요</option>
             <option value="unchecked">조회 전</option>
@@ -125,5 +140,24 @@
       </div>
     </section>
   </main>
+  <dialog id="price-edit-dialog" aria-labelledby="price-edit-heading">
+    <form id="price-edit-form" novalidate>
+      <h2 id="price-edit-heading">할인 판매가 수정</h2>
+      <p id="price-edit-product" class="muted"></p>
+      <label for="price-edit-value">할인 판매가</label>
+      <div class="price-edit-amount">
+        <input id="price-edit-value" type="text" inputmode="numeric" autocomplete="off" required
+          aria-describedby="price-edit-hint price-edit-message">
+        <span>원</span>
+      </div>
+      <p id="price-edit-hint" class="muted"></p>
+      <p class="muted price-edit-note">확인은 목록의 금액만 저장합니다. 실제 변경은 현재가 조회 후 기존 실행 버튼으로 진행하세요. 업로드 원본은 보관됩니다.</p>
+      <p id="price-edit-message" role="alert"></p>
+      <div class="price-edit-actions">
+        <button id="price-edit-cancel" class="button button-outline" type="button">취소</button>
+        <button id="price-edit-save" class="button button-primary" type="submit">확인</button>
+      </div>
+    </form>
+  </dialog>
 </body>
 </html>

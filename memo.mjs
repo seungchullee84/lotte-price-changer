@@ -12,12 +12,22 @@ export function parseMemo(text) {
   const errors = [];
   const rowsByLookup = new Map();
   const lines = text.replace(/^\uFEFF/, '').split(/\r\n|[\r\n]/);
+  const headers = [
+    new Set(['품번', '상품품번', '스타일코드']),
+    new Set(['원가격', '원래가격', '정상가', '현재가', '기존판매가', '기존가격', '기준가']),
+    new Set(['할인가', '할인판매가', '변경가', '변경판매가']),
+  ];
+  let firstContentRow = true;
 
   for (const [index, rawLine] of lines.entries()) {
     if (!rawLine.trim()) continue;
 
     const line = index + 1;
     const columns = rawLine.split('\t').map(column => column.trim());
+    const isHeader = firstContentRow && columns.length === 3 && columns.every((column, index) =>
+      headers[index].has(column.replace(/\s+/g, '').replace(/\(원\)$/, '')));
+    firstContentRow = false;
+    if (isHeader) continue;
     if (columns.length !== 3) {
       errors.push({ line, message: '탭으로 구분된 품번, 원가격, 할인 판매가 세 항목이 필요합니다.' });
       continue;

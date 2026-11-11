@@ -1,6 +1,6 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { appendFile, readFile, mkdir, readdir, writeFile } from 'node:fs/promises';
+import { access, appendFile, readFile, mkdir, readdir, writeFile, rename } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +13,22 @@ const dataDir = process.env.PRICE_CHANGER_DATA || path.join(appDir, 'data');
 const planStore = openPlan(path.join(dataDir, 'price-plan.json'));
 const archiveDir = path.join(dataDir, 'price-plan-history');
 const portal = openPortal(path.join(dataDir, 'chrome-profile'));
-const token = randomBytes(24).toString('hex');
+await mkdir(dataDir, { recursive: true });
+const tokenFile = path.join(dataDir, 'local-auth.key');
+try {
+  await writeFile(tokenFile, randomBytes(24).toString('hex'), { flag: 'wx', mode: 0o600 });
+} catch (error) {
+  if (error.code !== 'EEXIST') throw error;
+}
+const token = (await readFile(tokenFile, 'utf8')).trim();
+if (!/^[a-f0-9]{48}$/.test(token)) throw new Error('가격 변경기 접속 키 파일을 확인해 주세요.');
+const port = Number(process.env.PRICE_CHANGER_PORT || 49428);
+const startupWarnings = [];
+async function logError(context, error) {
+  const entry = { at: new Date().toISOString(), context, code: error.code, message: error.message };
+  await appendFile(path.join(dataDir, 'errors.jsonl'), JSON.stringify(entry) + '\n', { mode: 0o600 })
+    .catch(() => console.error(context, error.message));
+}
 const money = new Intl.NumberFormat('ko-KR');
 const KST_OFFSET = 9 * 60 * 60 * 1000;
 const HOUR = 60 * 60 * 1000;
@@ -39,7 +54,7 @@ function restriction(row, mode) {
 }
 
 function scheduleNearNow() {
-  const next = new Date(Math.round((Date.now() + KST_OFFSET + HOUR) / HOUR) * HOUR).toISOString();
+  const next = new Date((Math.floor((Date.now() + KST_OFFSET) / HOUR) + 1) * HOUR).toISOString();
   return { date: next.slice(0, 10), hour: next.slice(11, 13) };
 }
 
@@ -71,8 +86,10 @@ async function readBody(req, max) {
   return Buffer.concat(parts, size);
 }
 
-function readWorkbook(bytes) {
-  const python = process.env.PRICE_CHANGER_PYTHON || 'python';
+async function readWorkbook(bytes) {
+  const bundledPython = path.resolve(path.dirname(process.execPath), '../../python/python.exe');
+  const python = process.env.PRICE_CHANGER_PYTHON ||
+    (await access(bundledPython).then(() => bundledPython).catch(() => 'python'));
   return new Promise((resolve, reject) => {
     const child = spawn(python, ['-X', 'utf8', path.join(appDir, 'read-xlsx.py')], {
       windowsHide: true,
@@ -96,7 +113,14 @@ function readWorkbook(bytes) {
   });
 }
 
-let plan = await planStore.load();
+let plan;
+try {
+  plan = await planStore.load();
+  if (planStore.recoveryMessage) startupWarnings.push(planStore.recoveryMessage);
+} catch (error) {
+  startupWarnings.push('저장된 가격 목록을 읽지 못했습니다. 원본 파일을 확인하거나 목록을 다시 불러오세요.');
+  await logError('load-plan', error);
+}
 if (!plan && process.argv[2]) {
   const sourceText = await readFile(process.argv[2], 'utf8');
   const parsed = parseMemo(sourceText);
@@ -110,32 +134,102 @@ if (!plan && process.argv[2]) {
 let mode = 'discount';
 let results = {};
 let busy = false;
+const runStateFile = path.join(dataDir, 'run-state.json');
+let pendingStateWrite = Promise.resolve();
+function persistRunState() {
+  const rowRevisions = Object.fromEntries((plan?.rows ?? []).map(row => [row.line, row.priceRevision ?? '']));
+  const contents = JSON.stringify({ planId: plan && planId(plan), mode, results, rowRevisions });
+  const write = pendingStateWrite.then(async () => {
+    const temporary = runStateFile + '.tmp';
+    await writeFile(temporary, contents, { mode: 0o600, flush: true });
+    await rename(temporary, runStateFile);
+  });
+  pendingStateWrite = write.catch(() => {});
+  return write;
+}
+try {
+  const savedRun = JSON.parse(await readFile(runStateFile, 'utf8'));
+  if (plan && savedRun.planId === planId(plan) && ['discount', 'restore'].includes(savedRun.mode)) {
+    mode = savedRun.mode;
+    for (const row of plan.rows) {
+      const result = savedRun.results?.[row.line];
+      const expectedPrice = mode === 'restore' ? row.newPrice : row.currentPrice;
+      const targetPrice = mode === 'restore' ? row.currentPrice : row.newPrice;
+      const stale = (savedRun.rowRevisions?.[row.line] ?? '') !== (row.priceRevision ?? '') ||
+        (result?.expectedPrice !== undefined && result.expectedPrice !== expectedPrice) ||
+        (result?.targetPrice !== undefined && result.targetPrice !== targetPrice);
+      if (stale && result?.needsReview) {
+        results[row.line] = { ...result, status: 'interrupted',
+          message: '가격 수정 전 작업의 저장 결과가 불명확합니다. 현재가 조회로 포털 저장 결과를 확인하세요.' };
+        continue;
+      }
+      if (stale) continue;
+      if (result?.status === 'saved') results[row.line] = result;
+      else if (result?.needsReview) results[row.line] = {
+        ...result, status: 'interrupted', message: '이전 작업이 중단되었습니다. 현재가 조회로 포털 저장 결과를 확인하세요.',
+      };
+      else if (result?.status === 'ready' && result.offer) {
+        // Every subsequent write still queries the portal and validates the exact offer again.
+        results[row.line] = reconcileRow(row, [result.offer], mode);
+      } else if (['already', 'scheduled', 'pending_change', 'missing', 'ambiguous', 'mismatch', 'blocked', 'error'].includes(result?.status)) {
+        results[row.line] = result;
+      }
+    }
+  }
+} catch (error) {
+  if (error.code !== 'ENOENT') {
+    startupWarnings.push('이전 작업 기록을 읽지 못했습니다. 현재가를 조회해 적용 여부를 확인하세요.');
+    await logError('load-run-state', error);
+  }
+}
 const archiveIds = await readdir(archiveDir).catch(error => {
   if (error.code === 'ENOENT') return [];
   throw error;
 });
 const history = new Map();
+const archivedImports = new Map();
 for (const filename of archiveIds.filter(filename => /^[a-f0-9]{16}\.json$/.test(filename))) {
   const id = filename.slice(0, -5);
-  const saved = await openPlan(path.join(archiveDir, filename)).load();
-  if (saved) history.set(id, planSummary(saved, id));
+  try {
+    const saved = await openPlan(path.join(archiveDir, filename)).load();
+    if (saved) {
+      history.set(id, planSummary(saved, id));
+      archivedImports.set(importIdentity(saved), id);
+    }
+  } catch (error) { await logError('load-history:' + id, error); }
+}
+if (plan) {
+  try {
+    const archived = await archivePlan(plan);
+    if (plan.archiveId !== archived.archiveId) {
+      await planStore.save(archived);
+      plan = archived;
+    }
+  } catch (error) {
+    startupWarnings.push('현재 목록은 유지됐지만 보관함에 저장하지 못했습니다. 저장 공간과 폴더 권한을 확인하세요.');
+    await logError('archive-current-plan', error);
+  }
 }
 let message = plan
   ? '포털에 로그인하고 가격관리를 연 뒤 현재가를 조회하세요.'
   : '엑셀 또는 메모장을 불러와 가격 목록을 저장하세요.';
 
 function publicState() {
-  const schedule = plan?.schedule ?? scheduleNearNow();
+  const storedSchedule = plan?.schedule;
+  const scheduledAt = Date.parse(storedSchedule?.date + 'T' + storedSchedule?.hour + ':00:00+09:00');
+  const schedule = scheduledAt > Date.now() ? storedSchedule : scheduleNearNow();
   return {
     plan: plan && { ...plan, rows: plan.rows.map(row => ({ ...row, restriction: restriction(row, 'discount') })) },
     mode,
     results,
     busy,
     message,
+    warnings: startupWarnings,
     defaultDate: schedule.date,
     defaultHour: schedule.hour,
-    history: [...history.values()].filter(item => item.id !== (plan && planId(plan)))
-      .sort((a, b) => b.importedAt.localeCompare(a.importedAt)),
+    history: [...history.values()]
+      .map(item => ({ ...item, current: item.id === plan?.archiveId }))
+      .sort((a, b) => b.importedAt.localeCompare(a.importedAt) || b.id.localeCompare(a.id)),
   };
 }
 
@@ -147,7 +241,7 @@ function blockedResult(row, operation, reason) {
   };
 }
 
-async function checkPrices() {
+async function checkPrices(onCheckedGroup) {
   const byCode = new Map();
   let checked = 0;
   const total = plan.rows.length;
@@ -169,10 +263,6 @@ async function checkPrices() {
       for (const row of rows) {
         const result = reconcileRow(row, offers, mode);
         if (result.status === 'missing') result.message = '검색 결과 없음 · 건너뜀';
-        if (result.status === 'ready' && /진행|예정|대기|요청|승인중/.test(result.offer.scheduledStatus)) {
-          result.status = 'blocked';
-          result.message = '포털에 판매가 변경 예정 정보가 있습니다.';
-        }
         results[row.line] = result;
       }
       for (const row of rows) {
@@ -185,6 +275,7 @@ async function checkPrices() {
         }
       }
     } catch (error) {
+      await logError('query:' + code, error);
       for (const row of rows) results[row.line] = { status: 'error', message: error.message };
       if (error.code === 'PORTAL_SCREEN') {
         for (const result of Object.values(results)) {
@@ -195,19 +286,31 @@ async function checkPrices() {
       }
     }
     checked += rows.length;
+    if (onCheckedGroup && !await onCheckedGroup(rows)) {
+      for (const result of Object.values(results)) {
+        if (result.status === 'pending') Object.assign(result, { status: 'error', message: '조회가 중단되었습니다.' });
+      }
+      return false;
+    }
   }
   const ready = Object.values(results).filter(row => row.status === 'ready').length;
-  message = '조회 완료 · ' + ready + '건 입력 가능';
+  const skipped = Object.values(results).filter(row => ['already', 'scheduled', 'pending_change'].includes(row.status)).length;
+  message = '조회 완료 · ' + ready + '건 입력 가능' + (skipped ? ' · 적용·진행 중 ' + skipped + '건 건너뜀' : '');
   return true;
 }
 
-async function stageRow(row, result, date, hour, { save = false } = {}) {
+async function stageRow(row, result, date, hour, { save = false, reuseSearch = false } = {}) {
   const reason = restriction(row, mode);
-  if (reason) throw new Error(reason);
-  validateSchedule(date, hour);
+  if (reason) throw Object.assign(new Error(reason), { saveAttempted: false });
+  try { validateSchedule(date, hour); } catch (error) { error.saveAttempted = false; throw error; }
   try {
-    await portal.stage(result.offer, result.expectedPrice, result.targetPrice, date, hour, { save });
+    await portal.stage(result.offer, result.expectedPrice, result.targetPrice, date, hour, { save, reuseSearch });
   } catch (error) {
+    if (error.code === 'OFFER_ALREADY' || error.code === 'OFFER_PENDING') {
+      Object.assign(result, error.progress, { offer: error.offer, needsReview: false });
+      message = row.code + ' · ' + result.message;
+      return false;
+    }
     const status = { OFFER_MISSING: 'missing', OFFER_CHANGED: 'mismatch' }[error.code];
     if (!status) throw error;
     result.status = status;
@@ -238,36 +341,66 @@ async function stageRow(row, result, date, hour, { save = false } = {}) {
   return true;
 }
 
-async function runBatch(operation, date, hour) {
+async function runBatch(operation, date, hour, { immediate = false } = {}) {
   if (Object.values(results).some(result => result.needsReview)) {
     throw new Error('포털에서 중단된 상품의 저장 결과를 확인한 뒤 현재가를 다시 조회해 주세요.');
   }
-  if (mode !== operation || !Object.keys(results).length) {
+  if (!immediate && (mode !== operation || plan.rows.some(row => !results[row.line]))) {
     mode = operation;
     results = {};
     if (!await checkPrices()) return;
   }
+  let saved = 0;
+  let skipped = 0;
+  async function saveRow(row, progress, reuseSearch = false) {
+    const result = results[row.line];
+    let counted = false;
+    message = '포털 저장 중 (' + progress + ') · ' + row.code + ' · ' +
+      money.format(result.targetPrice) + '원';
+    try {
+      result.needsReview = true;
+      await persistRunState();
+      if (await stageRow(row, result, date, hour, { save: true, reuseSearch })) { saved += 1; counted = true; }
+      else skipped += 1;
+      result.needsReview = false;
+      await persistRunState();
+    } catch (error) {
+      if (result.status === 'saved') { if (!counted) saved += 1; }
+      else Object.assign(result, { status: 'error', needsReview: error.saveAttempted !== false, message: error.message });
+      await persistRunState().catch(stateError => logError('persist-failed-save', stateError));
+      await logError('save:' + row.code, error);
+      message = '일괄 저장 중단 · ' + (immediate ? '' : '저장 확인 ' + saved + '건 · ') + row.code + ' · ' + error.message;
+      return false;
+    }
+    return true;
+  }
+
+  if (immediate) {
+    mode = operation;
+    results = {};
+    const completed = await checkPrices(async rows => {
+      const eligible = rows.filter(row => results[row.line].status === 'ready');
+      for (const [index, row] of eligible.entries()) {
+        if (!await saveRow(row, (saved + skipped + 1) + '건째', index === 0)) return false;
+      }
+      return true;
+    });
+    if (!completed) {
+      message = '저장 확인 ' + saved + '건 · ' + message;
+      return;
+    }
+    skipped = plan.rows.length - saved;
+    message = '조회 후 바로 적용 완료 · 저장 확인 ' + saved + '건' + (skipped ? ' · 미저장 ' + skipped + '건' : '');
+    return;
+  }
+
   const eligible = plan.rows.filter(row => results[row.line]?.status === 'ready');
   if (!eligible.length) {
     message = '추가로 저장할 상품이 없습니다. 조회 결과를 확인해 주세요.';
     return;
   }
-
-  let saved = 0;
-  let skipped = 0;
   for (const [index, row] of eligible.entries()) {
-    const result = results[row.line];
-    message = '포털 저장 중 (' + (index + 1) + '/' + eligible.length + ') · ' + row.code + ' · ' +
-      money.format(result.targetPrice) + '원';
-    try {
-      if (await stageRow(row, result, date, hour, { save: true })) saved += 1;
-      else skipped += 1;
-    } catch (error) {
-      if (result.status === 'saved') saved += 1;
-      else Object.assign(result, { status: 'error', needsReview: true, message: error.message });
-      message = '일괄 저장 중단 · 저장 확인 ' + saved + '건 · ' + row.code + ' · ' + error.message;
-      return;
-    }
+    if (!await saveRow(row, (index + 1) + '/' + eligible.length)) return;
   }
   message = '일괄 저장 완료 · 저장 확인 ' + saved + '건' + (skipped ? ' · 건너뜀 ' + skipped + '건' : '');
 }
@@ -277,21 +410,38 @@ function planId(saved) {
 }
 
 function planSummary(saved, id) {
-  return { id, importedAt: saved.importedAt, rowCount: saved.rows.length, sourceName: saved.sourceName };
+  return { id, importedAt: saved.importedAt, rowCount: saved.rows.length, sourceName: saved.sourceName,
+    downloadUrl: '/api/history/' + id + '/download' };
+}
+
+function importIdentity(saved) {
+  return JSON.stringify([saved.sourceText, saved.importedAt, saved.sourceName ?? '']);
+}
+
+async function archivePlan(saved) {
+  const identity = importIdentity(saved);
+  const suppliedId = typeof saved.archiveId === 'string' && /^[a-f0-9]{16}$/.test(saved.archiveId)
+    ? saved.archiveId : undefined;
+  // Legacy imports get a stable migration ID; every new import explicitly supplies a fresh ID.
+  const id = suppliedId ?? archivedImports.get(identity) ??
+    createHash('sha256').update('import:' + identity).digest('hex').slice(0, 16);
+  const archived = { ...saved, archiveId: id };
+  if (!history.has(id)) {
+    await openPlan(path.join(archiveDir, id + '.json')).save(archived);
+    history.set(id, planSummary(archived, id));
+    archivedImports.set(identity, id);
+  }
+  return archived;
 }
 
 async function activatePlan(next) {
-  if (plan && plan.sourceText !== next.sourceText) {
-    const id = planId(plan);
-    if (!history.has(id)) {
-      await openPlan(path.join(archiveDir, id + '.json')).save(plan);
-      history.set(id, planSummary(plan, id));
-    }
-  }
-  await planStore.save(next);
-  plan = next;
+  if (plan) await archivePlan(plan);
+  const archived = await archivePlan(next);
+  await planStore.save(archived);
+  plan = archived;
   mode = 'discount';
   results = {};
+  await persistRunState();
   message = '목록 ' + next.rows.length + '건 저장 완료';
 }
 
@@ -302,8 +452,46 @@ async function importPlan(sourceText, sourceName) {
   const parsed = parseMemo(sourceText);
   if (!parsed.rows.length) throw new Error(parsed.errors[0]?.message || '저장할 가격 목록이 없습니다.');
   const name = typeof sourceName === 'string' ? path.basename(sourceName).slice(0, 120) : undefined;
-  await activatePlan({ sourceText, ...parsed, sourceName: name,
+  await activatePlan({ sourceText, ...parsed, sourceName: name, archiveId: randomBytes(8).toString('hex'),
     importedAt: new Date().toISOString(), schedule: scheduleNearNow() });
+}
+
+async function editPlanPrice(body) {
+  if (!plan?.rows.length) throw new Error('먼저 가격 목록을 저장해 주세요.');
+  if (!Number.isSafeInteger(body?.line) || body.line < 1 ||
+      typeof body.originalCode !== 'string' || !/^[0-9]{8}$/.test(body.originalCode) ||
+      !Number.isSafeInteger(body.expectedPrice) || body.expectedPrice <= 0 ||
+      !Number.isSafeInteger(body.newPrice) || body.newPrice <= 0) {
+    throw new Error('행 번호, 품번과 양의 정수 할인판매가를 확인해 주세요.');
+  }
+  const row = plan.rows.find(item => item.line === body.line);
+  if (!row || row.originalCode !== body.originalCode || row.newPrice !== body.expectedPrice) {
+    throw Object.assign(new Error('목록 또는 할인판매가가 변경되었습니다. 현재 목록을 새로 확인해 주세요.'), { status: 409 });
+  }
+  if (Object.values(results).some(result => result.status === 'pending' || result.needsReview)) {
+    throw Object.assign(new Error('포털에 입력 중이거나 저장 확인이 필요한 상품이 있습니다. 현재가를 다시 조회한 뒤 수정해 주세요.'), { status: 409 });
+  }
+  if (body.newPrice > row.currentPrice) throw new Error('할인판매가는 원가격보다 높게 입력할 수 없습니다.');
+  if (body.newPrice === row.newPrice) {
+    message = row.code + ' · 할인판매가가 같습니다. 기존 조회·저장 결과를 유지합니다.';
+    return;
+  }
+  const updatedRow = { ...row, newPrice: body.newPrice, uploadedNewPrice: row.uploadedNewPrice ?? row.newPrice,
+    priceUpdatedAt: new Date().toISOString(), priceRevision: randomBytes(8).toString('hex') };
+  const updatedPlan = { ...plan, rows: plan.rows.map(item => item === row ? updatedRow : item) };
+  // Commit the price first. A revision mismatch prevents old run results from returning after a crash.
+  await planStore.save(updatedPlan);
+  plan = updatedPlan;
+  results = { ...results };
+  delete results[row.line];
+  message = row.code + ' · 할인판매가를 ' + money.format(body.newPrice) + '원으로 수정했습니다. 현재가를 다시 조회해 주세요.';
+  try {
+    await persistRunState();
+  } catch (error) {
+    // The price is already durable. Do not report the edit as failed or revive its stale result.
+    message += ' 가격은 저장됐지만 작업 기록 갱신에 실패했습니다. 재시작해도 해당 행은 다시 조회해야 합니다.';
+    await logError('persist-price-edit', error);
+  }
 }
 
 function json(res, status, body) {
@@ -327,6 +515,24 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'GET') {
       if (url.pathname === '/api/state') return json(res, 200, publicState());
+      const download = url.pathname.match(/^\/api\/history\/([a-f0-9]{16})\/download$/);
+      if (download) {
+        const id = download[1];
+        if (!history.has(id)) return json(res, 404, { error: '보관된 목록을 찾을 수 없습니다.' });
+        const saved = await openPlan(path.join(archiveDir, id + '.json')).load();
+        if (!saved) return json(res, 404, { error: '보관된 목록 파일을 찾을 수 없습니다.' });
+        const importedDate = new Date(Date.parse(saved.importedAt) + KST_OFFSET).toISOString().slice(0, 10);
+        const filename = '가격목록_' + importedDate + '_' + id + '.txt';
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="price-list-' + id + '.txt"; filename*=UTF-8\'\'' + encodeURIComponent(filename),
+          'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+        return res.end(saved.sourceText);
+      }
+      if (url.pathname === '/api/portal/inspect') {
+        if (busy) return json(res, 409, { error: '진행 중인 작업이 있습니다.' });
+        busy = true;
+        try { return json(res, 200, { offers: await portal.inspect() }); } finally { busy = false; }
+      }
       const file = routes.get(url.pathname);
       if (!file) return json(res, 404, { error: '화면을 찾을 수 없습니다.' });
       const contents = await readFile(path.join(appDir, file[0]));
@@ -349,14 +555,21 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/api/import') {
       busy = true;
       try { await importPlan(body.sourceText, body.sourceName); } finally { busy = false; }
+    } else if (url.pathname === '/api/plan/price') {
+      busy = true;
+      try { await editPlanPrice(body); } finally { busy = false; }
     } else if (url.pathname === '/api/history/load') {
       if (!history.has(body.id)) throw new Error('저장된 목록을 다시 선택해 주세요.');
       busy = true;
       try {
-        const previous = await openPlan(path.join(archiveDir, body.id + '.json')).load();
-        if (!previous) throw new Error('저장된 목록 파일을 찾지 못했습니다.');
-        await activatePlan({ ...previous, schedule: scheduleNearNow() });
-        message = '이전 가격 목록 ' + previous.rows.length + '건 불러오기 완료';
+        if (body.id === plan?.archiveId) {
+          message = '현재 사용 중인 목록입니다. 기존 조회·저장 결과를 유지합니다.';
+        } else {
+          const previous = await openPlan(path.join(archiveDir, body.id + '.json')).load();
+          if (!previous) throw new Error('저장된 목록 파일을 찾지 못했습니다.');
+          await activatePlan({ ...previous, archiveId: body.id, schedule: scheduleNearNow() });
+          message = '이전 가격 목록 ' + previous.rows.length + '건 불러오기 완료';
+        }
       } finally { busy = false; }
     } else if (url.pathname === '/api/portal/open') {
       busy = true;
@@ -371,16 +584,23 @@ const server = createServer(async (req, res) => {
       try { await portal.ensureSearch(); } catch (error) { busy = false; throw error; }
       mode = operation;
       results = {};
-      void checkPrices().catch(error => { message = error.message; }).finally(() => { busy = false; });
-    } else if (url.pathname === '/api/portal/run') {
+      void checkPrices().catch(async error => { message = error.message; await logError('check', error); })
+        .finally(async () => {
+          try { await persistRunState(); } catch (error) { message = error.message; await logError('persist-check', error); }
+          busy = false;
+        });
+    } else if (url.pathname === '/api/portal/run' || url.pathname === '/api/portal/check-and-run') {
       if (!plan?.rows.length) throw new Error('먼저 가격 목록을 저장해 주세요.');
       const operation = validMode(body.mode);
       validateSchedule(body.date, body.hour);
       busy = true;
       try { await portal.ensureSearch(); } catch (error) { busy = false; throw error; }
-      void runBatch(operation, body.date, body.hour)
-        .catch(error => { message = error.message; })
-        .finally(() => { busy = false; });
+      void runBatch(operation, body.date, body.hour, { immediate: url.pathname === '/api/portal/check-and-run' })
+        .catch(async error => { message = error.message; await logError('run', error); })
+        .finally(async () => {
+          try { await persistRunState(); } catch (error) { message = error.message; await logError('persist-run', error); }
+          busy = false;
+        });
     } else if (url.pathname === '/api/portal/stage') {
       const operation = validMode(body.mode);
       const row = plan?.rows.find(item => item.line === body.line);
@@ -393,27 +613,36 @@ const server = createServer(async (req, res) => {
     }
     return json(res, 200, publicState());
   } catch (error) {
-    return json(res, 400, { error: error.message });
+    await logError(req.method + ' ' + new URL(req.url, origin).pathname, error);
+    return json(res, error.status === 409 ? 409 : 400, { error: error.message });
   }
 });
 
-server.on('error', error => {
-  console.error(error.code === 'EADDRINUSE' ? '이미 가격 변경기가 실행 중입니다. 기존 창을 사용해 주세요.' : error.message);
-  process.exitCode = 1;
-});
-
-server.listen(Number(process.env.PRICE_CHANGER_PORT || 49428), '127.0.0.1', async () => {
-  const url = 'http://127.0.0.1:' + server.address().port + '/?key=' + token;
-  console.log('가격 변경기 실행 중 · 이 창을 닫으면 종료됩니다.');
-  if (process.env.PRICE_CHANGER_READY_FILE) {
-    await mkdir(dataDir, { recursive: true });
-    await writeFile(process.env.PRICE_CHANGER_READY_FILE, url, 'utf8');
-  }
+async function openWindow() {
+  const url = 'http://127.0.0.1:' + port + '/?key=' + token;
+  const readyFile = process.env.PRICE_CHANGER_READY_FILE || path.join(dataDir, 'desktop-session.txt');
+  await writeFile(readyFile, url, { encoding: 'utf8', mode: 0o600 });
   if (process.env.PRICE_CHANGER_NO_OPEN === '1') return;
   const chrome = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   const child = spawn(chrome, ['--new-window', url], { windowsHide: true, stdio: 'ignore', detached: true });
   child.on('error', () => console.error('Chrome을 열지 못했습니다. Chrome 설치 경로를 확인해 주세요.'));
   child.unref();
+}
+
+server.on('error', error => {
+  if (error.code === 'EADDRINUSE') {
+    void fetch('http://127.0.0.1:' + port + '/api/state', {
+      headers: { Cookie: 'price_changer_' + port + '=' + token }, signal: AbortSignal.timeout(3000),
+    }).then(async response => {
+      if (!response.ok) throw new Error('같은 포트에서 다른 실행 인스턴스가 동작 중입니다.');
+      await openWindow();
+    }).catch(error => { console.error(error.message); process.exitCode = 1; });
+  } else { console.error(error.message); process.exitCode = 1; }
+});
+
+server.listen(port, '127.0.0.1', () => {
+  console.log('가격 변경기 실행 중 · 이 창을 닫으면 종료됩니다.');
+  void openWindow().catch(error => logError('open-window', error));
 });
 
 for (const signal of ['SIGINT', 'SIGTERM']) {

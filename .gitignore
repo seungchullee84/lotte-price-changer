@@ -3,3 +3,4 @@ data/
 .env
 *.log
 __pycache__/
+/tools/continue-live.mjs
