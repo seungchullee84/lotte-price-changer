@@ -260,6 +260,40 @@ test('all results are grouped once with effective restrictions and filters never
   assert.equal(posts, 0);
 });
 
+test('restoration shows the original price and sends the exact selected schedule only on reservation', async t => {
+  const state = fixtureState();
+  const requests = [];
+  const page = await openFixture(t, async route => {
+    if (route.request().method() === 'POST') {
+      const endpoint = new URL(route.request().url()).pathname;
+      const payload = route.request().postDataJSON();
+      requests.push({endpoint, payload});
+      if (endpoint === '/api/portal/check') {
+        state.mode = payload.mode;
+        state.results = {1: {status: 'ready', expectedPrice: 43100, targetPrice: 49800,
+          offer: {name: '기존 할인 상품', currentPrice: 43100}}};
+      }
+    }
+    await respond(route, state);
+  });
+  await page.waitForFunction(() => !document.querySelector('#check-prices').disabled);
+  await page.locator('input[name="mode"][value="restore"]').check();
+  assert.equal(await page.locator('#restore-help').isVisible(), true);
+  assert.match(await page.locator('#price-rows .target-price').innerText(), /49,800원/);
+  assert.equal(requests.length, 0);
+  await page.getByRole('button', {name: '현재가 조회', exact: true}).click();
+  await page.getByRole('button', {name: /원가격 복구 포털 입력/}).waitFor();
+  assert.match(await page.locator('#price-rows tr[data-line="1"]').innerText(), /43,100원/);
+  await page.locator('#schedule-date').fill('2099-02-03');
+  await page.locator('#schedule-hour').selectOption('19');
+  await page.getByRole('button', {name: '복구 대상만 예약', exact: true}).click();
+  await page.waitForFunction(() => !document.querySelector('#run-prices').disabled);
+  assert.deepEqual(requests, [
+    {endpoint: '/api/portal/check', payload: {mode: 'restore'}},
+    {endpoint: '/api/portal/run', payload: {mode: 'restore', date: '2099-02-03', hour: '19'}},
+  ]);
+});
+
 test('candidate-name searches combine with groups and survive a state refresh', async t => {
   const state = groupedFixtureState();
   let posts = 0;

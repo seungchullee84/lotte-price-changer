@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { openPlan, plannedChange, reconcileRow } from '../ledger.mjs';
+import { openPlan, plannedChange, reconcileRow, recordPriceChange } from '../ledger.mjs';
 import { parseMemo } from '../memo.mjs';
 
 const source = '01026990\t49,800\t44,200';
@@ -65,6 +65,37 @@ test('restore uses original price as target and skips an existing restoration', 
   assert.equal(result.status, 'scheduled');
   assert.equal(result.expectedPrice, 44200);
   assert.equal(result.targetPrice, 49800);
+});
+
+test('restoration uses a confirmed prior discount only for the same offer and original price', () => {
+  const history = new Map();
+  const change = {
+    mode: 'discount', originalCode: row.originalCode, code: row.code, productId: offer.id,
+    channel: '롯데', store: '매장', fromPrice: row.currentPrice, toPrice: 43000,
+    verifiedAt: '2000-01-01T00:00:00Z', effectiveAt: '2000-01-02T09:00:00+09:00',
+  };
+  assert.equal(recordPriceChange(history, change), true);
+  assert.equal(recordPriceChange(history, { ...change, effectiveAt: '2099-01-01T09:00:00+09:00', toPrice: 42000 }), true);
+  const discounted = { ...offer, currentPrice: change.toPrice, channel: change.channel, store: change.store };
+  const restored = reconcileRow(row, [discounted], 'restore', history);
+  assert.equal(restored.status, 'ready');
+  assert.equal(restored.expectedPrice, 43000);
+  assert.equal(restored.targetPrice, row.currentPrice);
+  assert.equal(reconcileRow(row, [{ ...discounted, store: '다른 매장' }], 'restore', history).status, 'mismatch');
+  assert.equal(reconcileRow({ ...row, currentPrice: 60000 }, [discounted], 'restore', history).status, 'mismatch');
+  assert.equal(reconcileRow(row, [{ ...discounted, currentPrice: 42000 }], 'restore', history).status, 'mismatch');
+  assert.equal(reconcileRow(row, [discounted, { ...discounted, id: 'another-offer', currentPrice: row.newPrice }], 'restore', history).status, 'ambiguous');
+
+  recordPriceChange(history, { ...change, mode: 'restore', fromPrice: 43000, toPrice: row.currentPrice,
+    verifiedAt: '2000-01-03T00:00:00Z', effectiveAt: '2000-01-04T09:00:00+09:00' });
+  assert.equal(reconcileRow(row, [discounted], 'restore', history).status, 'mismatch');
+});
+
+test('restoration reports a pending discount even while the current price is the original', () => {
+  const scheduled = { ...offer, scheduledStatus: '승인 완료', scheduledPrice: '44,200',
+    scheduledDate: '2099-01-02', scheduledHour: '09시' };
+  assert.equal(reconcileRow(row, [scheduled], 'restore').status, 'pending_change');
+  assert.equal(reconcileRow(row, [{ ...scheduled, scheduledDate: '2000-01-02' }], 'restore').status, 'already');
 });
 
 test('completed portal approval with a future timestamp skips matching and different targets', () => {

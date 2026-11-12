@@ -56,6 +56,7 @@ const statusLabels = {
   interrupted: "처리 중단",
   blocked: "입력 제한",
 };
+const restoreStatusLabels = { already: "이미 원가격", saved: "복구 예약 확인" };
 const resultGroups = [
   {value: "ready", label: "변경 대상", statuses: ["ready"]},
   {value: "missing", label: "상품 없음", statuses: ["missing"]},
@@ -111,6 +112,10 @@ function refreshControls() {
   const editingPrice = Boolean(priceEdit);
   const unresolved = hasUnresolvedInput();
   const haveRows = (state?.plan?.rows.length ?? 0) > 0;
+  const restoring = mode === "restore";
+  byId("restore-help").hidden = !restoring;
+  controls.run.textContent = restoring ? "복구 대상만 예약" : "변경 대상만 적용";
+  controls.checkAndRun.textContent = restoring ? "조회 후 복구 예약" : "조회 후 바로 적용";
   controls.portal.disabled = locked || editingPrice;
   controls.source.disabled = locked || editingPrice;
   controls.file.disabled = locked || editingPrice;
@@ -207,7 +212,8 @@ function makeRow(row, result) {
 
   const status = result?.status ?? "unchecked";
   const statusCell = element("td");
-  const label = status === "pending" && !state?.busy ? "포털 확인" : statusLabels[status];
+  let label = (mode === "restore" && restoreStatusLabels[status]) || statusLabels[status];
+  if (status === "pending" && !state?.busy) label = "포털 확인";
   const tag = element("span", label ?? "확인 필요", "tag");
   if (Object.hasOwn(statusLabels, status)) tag.classList.add("tag-" + status);
   statusCell.append(tag);
@@ -222,7 +228,7 @@ function makeRow(row, result) {
   }
   const actionCell = element("td");
   if (status === "ready") {
-    const button = element("button", "포털 입력", "button button-outline button-table");
+    const button = element("button", mode === "restore" ? "복구가 입력" : "포털 입력", "button button-outline button-table");
     button.type = "button";
     button.dataset.line = String(row.line);
     button.dataset.action = "stage";
@@ -407,11 +413,10 @@ function renderNotice() {
   error.textContent = [errorMessage, connectionError].filter(Boolean).join(" ");
   error.hidden = !error.textContent;
   const status = byId("status-message");
-  const modeLabel = mode === "restore" ? "원가격 복구" : "할인 적용";
   let message = state?.message ?? "";
   if (!state && !errorMessage) message = "저장된 목록을 확인하고 있습니다.";
   if (state?.plan?.rows.length && !state.busy && mode !== state.mode) {
-    message = modeLabel + "을 위해 현재가를 조회하세요.";
+    message = mode === "restore" ? "복구할 상품의 현재가를 조회하세요." : "할인 적용을 위해 현재가를 조회하세요.";
   }
   if (!isLocked() && isDraftEdited()) message = "목록을 저장한 뒤 현재가를 조회하세요.";
   if (priceEdit) message = priceEdit.originalCode + " 할인 판매가를 편집 중입니다. 확인으로 저장하거나 취소하세요.";

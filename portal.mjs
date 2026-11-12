@@ -467,6 +467,15 @@ export function openPortal(profileDirectory) {
   async function query(code) {
     if (!/^[0-9]{6}$/.test(code)) throw new Error('6자리 조회 품번을 확인해 주세요.');
     const portalPage = activePage();
+    try {
+      return await queryPage(portalPage, code);
+    } catch (error) {
+      if (portalPage.isClosed()) throw screenError('포털 창이 닫혔습니다. 크롬 로그인 창을 다시 열고 현재가를 조회해 주세요.');
+      throw error;
+    }
+  }
+
+  async function queryPage(portalPage, code) {
     await acceptSaveNotice(portalPage, false);
     const nameInput = await ensureSearchScreen(portalPage);
     if ((await readDraftGrids(portalPage)).flat().some(hasBlockingDraft)) {
@@ -496,8 +505,7 @@ export function openPortal(profileDirectory) {
       try {
         await waitForQueryResult(portalPage, watcher, code);
       } catch (error) {
-        if (portalPage.isClosed()) throw screenError('포털 창이 닫혔습니다. 포털을 다시 열고 로그인해 주세요.');
-        await ensureSearchScreen(portalPage);
+        if (!portalPage.isClosed()) await ensureSearchScreen(portalPage);
         throw error;
       }
     } finally {
@@ -518,7 +526,8 @@ export function openPortal(profileDirectory) {
     return exact;
   }
 
-  async function stage(offer, expectedPrice, targetPrice, date, hour, { save = false, reuseSearch = false } = {}) {
+  async function stage(offer, expectedPrice, targetPrice, date, hour,
+    { save = false, reuseSearch = false, checkPendingFirst = false } = {}) {
     const portalPage = activePage();
     let offers;
     if (reuseSearch) {
@@ -539,7 +548,7 @@ export function openPortal(profileDirectory) {
       throw Object.assign(new Error('현재가 또는 상품 정보가 바뀌었습니다. 다시 조회해 주세요.'), { code: 'OFFER_CHANGED' });
     }
     const fresh = matching[0];
-    const progress = plannedChange(fresh, targetPrice);
+    const progress = plannedChange(fresh, targetPrice, { checkPendingFirst });
     if (progress) {
       throw Object.assign(new Error(progress.message), {
         code: progress.status === 'already' ? 'OFFER_ALREADY' : 'OFFER_PENDING',

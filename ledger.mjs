@@ -107,17 +107,18 @@ export function openPlan(file) {
   };
 }
 
-export function plannedChange(offer, targetPrice) {
-  if (offer.currentPrice === targetPrice) {
-    return { status: 'already', message: '현재 판매가가 목표가와 같습니다. 건너뜀', offer };
-  }
+export function plannedChange(offer, targetPrice, { checkPendingFirst = false } = {}) {
+  const atTarget = offer.currentPrice === targetPrice
+    ? { status: 'already', message: '현재 판매가가 목표가와 같습니다. 건너뜀', offer }
+    : null;
+  if (atTarget && !checkPendingFirst) return atTarget;
   const portalResult = String(offer.portalResult ?? '').replace(/\s+/g, '');
   if (String(offer.portalSuccess ?? '').trim() === 'N' &&
       /이미.*판매가변경.*승인완료.*적용전/.test(portalResult)) {
     return { status: 'pending_change', message: '기존 판매가 변경이 승인 완료 후 적용 대기 중입니다. 건너뜀', offer };
   }
   const status = String(offer.scheduledStatus ?? '').replace(/\s+/g, '');
-  if (/(?:취소|반려|거절|실패|철회|해제|종료)(?:완료|됨)?$/.test(status)) return null;
+  if (/(?:취소|반려|거절|실패|철회|해제|종료)(?:완료|됨)?$/.test(status)) return atTarget;
   const scheduledPrice = Number(String(offer.scheduledPrice ?? '').replace(/[,\s원]/g, ''));
   const date = String(offer.scheduledDate ?? '').replace(/\D/g, '');
   const hourText = String(offer.scheduledHour ?? '').trim();
@@ -126,7 +127,7 @@ export function plannedChange(offer, targetPrice) {
   const scheduledAt = Date.parse(`${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}T${hour}:00:00+09:00`);
   const active = /진행중|진행$|예정|대기|요청|승인중/.test(status) ||
     (/^(?:완료|저장완료|신청완료|승인완료)$/.test(status) && scheduledAt > Date.now());
-  if (!active) return null;
+  if (!active) return atTarget;
   const sameTarget = Number.isSafeInteger(scheduledPrice) && scheduledPrice > 0 && scheduledPrice === targetPrice;
   return {
     status: sameTarget ? 'scheduled' : 'pending_change',
@@ -135,7 +136,38 @@ export function plannedChange(offer, targetPrice) {
   };
 }
 
-export function reconcileRow(row, offers, mode) {
+function offerKey(code, id, channel, store) {
+  return JSON.stringify([code, id, channel, store]);
+}
+
+export function recordPriceChange(history, change) {
+  if (!change || !['discount', 'restore'].includes(change.mode) ||
+      typeof change.originalCode !== 'string' || !/^\d{8}$/.test(change.originalCode) ||
+      change.originalCode.slice(2) !== change.code ||
+      ![change.productId, change.channel, change.store].every(value => typeof value === 'string' && value.trim()) ||
+      ![change.fromPrice, change.toPrice].every(value => Number.isSafeInteger(value) && value > 0)) return false;
+  const effective = Date.parse(change.effectiveAt);
+  const verified = Date.parse(change.verifiedAt);
+  if (!Number.isFinite(effective) || !Number.isFinite(verified)) return false;
+  const key = offerKey(change.code, change.productId, change.channel, change.store);
+  if (!history.has(key)) history.set(key, []);
+  history.get(key).push({ ...change, effective, verified });
+  return true;
+}
+
+function matchesSavedDiscount(row, offer, history, now) {
+  const changes = history?.get(offerKey(offer.code, offer.id, offer.channel, offer.store)) ?? [];
+  let latest;
+  for (const change of changes) {
+    if (change.effective > now) continue;
+    if (!latest || change.effective > latest.effective ||
+        (change.effective === latest.effective && change.verified >= latest.verified)) latest = change;
+  }
+  return latest?.mode === 'discount' && latest.originalCode === row.originalCode &&
+    latest.fromPrice === row.currentPrice && latest.toPrice < latest.fromPrice && latest.toPrice === offer.currentPrice;
+}
+
+export function reconcileRow(row, offers, mode, history) {
   if (mode !== 'discount' && mode !== 'restore') {
     throw new TypeError('할인 또는 원가격 복구 모드를 선택해 주세요.');
   }
@@ -147,19 +179,25 @@ export function reconcileRow(row, offers, mode) {
 
   if (offers.length === 0) return { ...prices, status: 'missing' };
 
-  const matches = offers.filter(offer => offer.currentPrice === expectedPrice);
+  const now = Date.now();
+  const progress = offer => plannedChange(offer, targetPrice, { checkPendingFirst: restoring });
+  const matches = offers.filter(offer => offer.currentPrice === expectedPrice ||
+    (restoring && matchesSavedDiscount(row, offer, history, now)));
   if (matches.length > 1) return { ...prices, status: 'ambiguous', offers: matches };
   if (matches.length === 1) {
-    const existing = plannedChange(matches[0], targetPrice);
-    return { ...prices, ...(existing ?? { status: 'ready', offer: matches[0] }) };
+    const [offer] = matches;
+    const existing = progress(offer);
+    const result = { ...prices, expectedPrice: offer.currentPrice, ...(existing ?? { status: 'ready', offer }) };
+    if (!existing && offer.currentPrice !== expectedPrice) result.message = '저장 기록에서 적용된 할인 판매가 확인';
+    return result;
   }
 
   const atTarget = offers.filter(offer => offer.currentPrice === targetPrice);
   if (atTarget.length > 1) return { ...prices, status: 'ambiguous', offers: atTarget };
-  if (atTarget.length === 1) return { ...prices, ...plannedChange(atTarget[0], targetPrice) };
+  if (atTarget.length === 1) return { ...prices, ...progress(atTarget[0]) };
 
   if (offers.length === 1) {
-    const existing = plannedChange(offers[0], targetPrice);
+    const existing = progress(offers[0]);
     if (existing) return { ...prices, ...existing };
   }
 

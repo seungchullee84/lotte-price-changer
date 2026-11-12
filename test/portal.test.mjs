@@ -196,15 +196,26 @@ test('the portal already-approved rejection is acknowledged and skipped without 
   assert.equal(counters.saveClicks, 1);
 });
 
-function portalWithOffer(currentOffer) {
+function portalWithOffer(currentOffer, { closeDuringLookup = false } = {}) {
   let mutations = 0;
+  let closed = false;
   const page = new EventEmitter();
-  page.isClosed = () => false;
+  page.isClosed = () => closed;
   page.url = () => 'https://together.lotteshopping.com/EMDV3/index.html';
   page.setDefaultTimeout = () => {};
   page.bringToFront = async () => {};
+  page.getByText = () => ({ filter: () => ({ count: async () => 0 }) });
   page.locator = selector => ({ filter: () => {
-    if (selector.includes('edt_prdcNm_input')) return { count: async () => 1, inputValue: async () => '123456' };
+    if (selector.includes('edt_prdcNm_input')) return {
+      count: async () => 1,
+      inputValue: async () => '123456',
+      fill: async () => {
+        if (closeDuringLookup) {
+          closed = true;
+          throw new Error('locator.fill: Target page, context or browser has been closed');
+        }
+      },
+    };
     if (selector.includes('cbo_prdcCdCl_comboedit_input')) return { inputValue: async () => '-전체-' };
     if (selector.includes('sta_TotalTextBoxElement')) return { innerText: async () => '총 1건' };
     if (selector.includes('_grd_Master')) return { count: async () => 1, evaluate: async () => snapshotOf(currentOffer) };
@@ -216,6 +227,14 @@ function portalWithOffer(currentOffer) {
   setTestChromium({ launchPersistentContext: async () => context });
   return { portal: openPortal('unused-test-profile'), mutations: () => mutations };
 }
+
+test('closing the portal during lookup reports how to reconnect', async () => {
+  const { portal } = portalWithOffer({ ...offer, stagedPrice: '' }, { closeDuringLookup: true });
+  await portal.open();
+  await assert.rejects(portal.query('123456'),
+    error => error.code === 'PORTAL_SCREEN' && /크롬 로그인 창을 다시 열고 현재가/.test(error.message));
+  await portal.close();
+});
 
 test('stage skips a price applied after lookup before editing any portal fields', async () => {
   const { portal, mutations } = portalWithOffer({ ...offer, currentPrice: 15000 });

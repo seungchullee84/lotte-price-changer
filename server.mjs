@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseMemo } from './memo.mjs';
-import { openPlan, reconcileRow } from './ledger.mjs';
+import { openPlan, reconcileRow, recordPriceChange } from './ledger.mjs';
 import { openPortal } from './portal.mjs';
 
 const appDir = fileURLToPath(new URL('.', import.meta.url));
@@ -131,6 +131,26 @@ if (!plan && process.argv[2]) {
   await planStore.save(plan);
 }
 
+const auditFile = path.join(dataDir, 'price-change-audit.jsonl');
+const priceChanges = new Map();
+try {
+  const audit = (await readFile(auditFile, 'utf8')).replace(/^\uFEFF/, '');
+  let skipped = 0;
+  for (const line of audit.split(/\r?\n/).filter(line => line.trim())) {
+    try {
+      if (!recordPriceChange(priceChanges, JSON.parse(line))) skipped += 1;
+    } catch {
+      skipped += 1;
+    }
+  }
+  if (skipped) startupWarnings.push('가격 변경 기록 중 ' + skipped + '건을 읽지 못했습니다.');
+} catch (error) {
+  if (error.code !== 'ENOENT') {
+    startupWarnings.push('가격 변경 기록을 읽지 못했습니다. 복구 대상을 목록의 할인 판매가와 대조합니다.');
+    await logError('load-price-change-audit', error);
+  }
+}
+
 let mode = 'discount';
 let results = {};
 let busy = false;
@@ -153,10 +173,9 @@ try {
     mode = savedRun.mode;
     for (const row of plan.rows) {
       const result = savedRun.results?.[row.line];
-      const expectedPrice = mode === 'restore' ? row.newPrice : row.currentPrice;
       const targetPrice = mode === 'restore' ? row.currentPrice : row.newPrice;
       const stale = (savedRun.rowRevisions?.[row.line] ?? '') !== (row.priceRevision ?? '') ||
-        (result?.expectedPrice !== undefined && result.expectedPrice !== expectedPrice) ||
+        (mode === 'discount' && result?.expectedPrice !== undefined && result.expectedPrice !== row.currentPrice) ||
         (result?.targetPrice !== undefined && result.targetPrice !== targetPrice);
       if (stale && result?.needsReview) {
         results[row.line] = { ...result, status: 'interrupted',
@@ -170,7 +189,7 @@ try {
       };
       else if (result?.status === 'ready' && result.offer) {
         // Every subsequent write still queries the portal and validates the exact offer again.
-        results[row.line] = reconcileRow(row, [result.offer], mode);
+        results[row.line] = reconcileRow(row, [result.offer], mode, priceChanges);
       } else if (['already', 'scheduled', 'pending_change', 'missing', 'ambiguous', 'mismatch', 'blocked', 'error'].includes(result?.status)) {
         results[row.line] = result;
       }
@@ -261,7 +280,7 @@ async function checkPrices(onCheckedGroup) {
     try {
       const offers = await portal.query(code);
       for (const row of rows) {
-        const result = reconcileRow(row, offers, mode);
+        const result = reconcileRow(row, offers, mode, priceChanges);
         if (result.status === 'missing') result.message = '검색 결과 없음 · 건너뜀';
         results[row.line] = result;
       }
@@ -304,7 +323,9 @@ async function stageRow(row, result, date, hour, { save = false, reuseSearch = f
   if (reason) throw Object.assign(new Error(reason), { saveAttempted: false });
   try { validateSchedule(date, hour); } catch (error) { error.saveAttempted = false; throw error; }
   try {
-    await portal.stage(result.offer, result.expectedPrice, result.targetPrice, date, hour, { save, reuseSearch });
+    await portal.stage(result.offer, result.expectedPrice, result.targetPrice, date, hour, {
+      save, reuseSearch, checkPendingFirst: mode === 'restore',
+    });
   } catch (error) {
     if (error.code === 'OFFER_ALREADY' || error.code === 'OFFER_PENDING') {
       Object.assign(result, error.progress, { offer: error.offer, needsReview: false });
@@ -320,7 +341,7 @@ async function stageRow(row, result, date, hour, { save = false, reuseSearch = f
   }
   if (save) {
     result.status = 'saved';
-    result.message = '포털 저장 확인';
+    result.message = mode === 'restore' ? '포털 원가격 복구 예약 확인' : '포털 저장 확인';
     const entry = {
       planId: planId(plan), line: row.line, originalCode: row.originalCode, code: row.code,
       productId: result.offer.id, channel: result.offer.channel, store: result.offer.store,
@@ -328,8 +349,8 @@ async function stageRow(row, result, date, hour, { save = false, reuseSearch = f
       effectiveAt: date + 'T' + hour + ':00:00+09:00', verifiedAt: new Date().toISOString(),
     };
     try {
-      await appendFile(path.join(dataDir, 'price-change-audit.jsonl'), JSON.stringify(entry) + '\n',
-        { encoding: 'utf8', mode: 0o600, flush: true });
+      await appendFile(auditFile, JSON.stringify(entry) + '\n', { encoding: 'utf8', mode: 0o600, flush: true });
+      recordPriceChange(priceChanges, entry);
     } catch {
       throw new Error('포털 저장은 확인했지만 로컬 작업 기록을 저장하지 못했습니다.');
     }
@@ -390,7 +411,8 @@ async function runBatch(operation, date, hour, { immediate = false } = {}) {
       return;
     }
     skipped = plan.rows.length - saved;
-    message = '조회 후 바로 적용 완료 · 저장 확인 ' + saved + '건' + (skipped ? ' · 미저장 ' + skipped + '건' : '');
+    message = (operation === 'restore' ? '조회 후 복구 예약 완료' : '조회 후 바로 적용 완료') +
+      ' · 저장 확인 ' + saved + '건' + (skipped ? ' · 미저장 ' + skipped + '건' : '');
     return;
   }
 
@@ -402,7 +424,8 @@ async function runBatch(operation, date, hour, { immediate = false } = {}) {
   for (const [index, row] of eligible.entries()) {
     if (!await saveRow(row, (index + 1) + '/' + eligible.length)) return;
   }
-  message = '일괄 저장 완료 · 저장 확인 ' + saved + '건' + (skipped ? ' · 건너뜀 ' + skipped + '건' : '');
+  message = (operation === 'restore' ? '원가격 복구 예약 완료' : '일괄 저장 완료') +
+    ' · 저장 확인 ' + saved + '건' + (skipped ? ' · 건너뜀 ' + skipped + '건' : '');
 }
 
 function planId(saved) {
