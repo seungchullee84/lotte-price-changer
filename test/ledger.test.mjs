@@ -77,18 +77,23 @@ test('restoration uses a confirmed prior discount only for the same offer and or
   assert.equal(recordPriceChange(history, change), true);
   assert.equal(recordPriceChange(history, { ...change, effectiveAt: '2099-01-01T09:00:00+09:00', toPrice: 42000 }), true);
   const discounted = { ...offer, currentPrice: change.toPrice, channel: change.channel, store: change.store };
-  const restored = reconcileRow(row, [discounted], 'restore', history);
+  const other = { ...discounted, id: 'unrelated-offer', currentPrice: 46000 };
+  const restored = reconcileRow(row, [discounted, other], 'restore', history);
   assert.equal(restored.status, 'ready');
   assert.equal(restored.expectedPrice, 43000);
   assert.equal(restored.targetPrice, row.currentPrice);
-  assert.equal(reconcileRow(row, [{ ...discounted, store: '다른 매장' }], 'restore', history).status, 'mismatch');
-  assert.equal(reconcileRow({ ...row, currentPrice: 60000 }, [discounted], 'restore', history).status, 'mismatch');
-  assert.equal(reconcileRow(row, [{ ...discounted, currentPrice: 42000 }], 'restore', history).status, 'mismatch');
+  assert.equal(reconcileRow(row, [{ ...discounted, store: '다른 매장' }, other], 'restore', history).status, 'ambiguous');
+  assert.equal(reconcileRow({ ...row, currentPrice: 60000 }, [discounted, other], 'restore', history).status, 'ambiguous');
+  assert.equal(reconcileRow(row, [{ ...discounted, currentPrice: 42000 }, other], 'restore', history).status, 'ambiguous');
   assert.equal(reconcileRow(row, [discounted, { ...discounted, id: 'another-offer', currentPrice: row.newPrice }], 'restore', history).status, 'ambiguous');
 
   recordPriceChange(history, { ...change, mode: 'restore', fromPrice: 43000, toPrice: row.currentPrice,
     verifiedAt: '2000-01-03T00:00:00Z', effectiveAt: '2000-01-04T09:00:00+09:00' });
-  assert.equal(reconcileRow(row, [discounted], 'restore', history).status, 'mismatch');
+  assert.equal(reconcileRow(row, [discounted, other], 'restore', history).status, 'ambiguous');
+  recordPriceChange(history, { ...change, toPrice: 52000,
+    verifiedAt: '2000-01-05T00:00:00Z', effectiveAt: '2000-01-06T09:00:00+09:00' });
+  const raised = { ...discounted, currentPrice: 52000 };
+  assert.equal(reconcileRow(row, [raised, other], 'restore', history).offer, raised);
 });
 
 test('restoration reports a pending discount even while the current price is the original', () => {
@@ -105,9 +110,16 @@ test('completed portal approval with a future timestamp skips matching and diffe
   assert.equal(plannedChange({ ...pending, scheduledDate: '2000-11-12 20:00:00' }, 44200), null);
 });
 
-test('multiple matching products remain ambiguous and mismatches remain reviewable', () => {
+test('a unique portal product uses the observed price while multiple candidates still require identification', () => {
+  const differentPrice = { ...offer, currentPrice: 45000 };
+  for (const [mode, targetPrice] of [['discount', 44200], ['restore', 49800]]) {
+    const result = reconcileRow(row, [differentPrice], mode);
+    assert.equal(result.status, 'ready');
+    assert.equal(result.expectedPrice, 45000);
+    assert.equal(result.targetPrice, targetPrice);
+  }
   assert.equal(reconcileRow(row, [offer, { ...offer, id: 'product-2' }], 'discount').status, 'ambiguous');
-  assert.equal(reconcileRow(row, [{ ...offer, currentPrice: 45000 }], 'discount').status, 'mismatch');
+  assert.equal(reconcileRow(row, [differentPrice, { ...differentPrice, id: 'product-2', currentPrice: 45001 }], 'discount').status, 'ambiguous');
   assert.equal(reconcileRow(row, [], 'discount').status, 'missing');
 });
 

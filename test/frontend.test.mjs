@@ -217,11 +217,14 @@ function groupedFixtureState() {
       {name: '베이지 후보 니트', currentPrice: 45900},
     ],
   };
-  state.results[4].message = '할인율이 50%를 넘습니다. 할인 하한은 24,900원입니다.';
+  state.plan.rows[3].newPrice = 7000;
+  state.plan.rows[3].restriction = '적용 가격이 7,000원 이하입니다.';
+  state.results[4].message = '적용 가격이 7,000원 이하입니다.';
   state.results[9].offers = [{name: '이름으로 찾을 후보상품', currentPrice: 49800}];
   state.plan.rows.push({
-    line: 14, code: '009999', originalCode: '01009999', currentPrice: 9900, newPrice: 5000,
-    restriction: '판매가가 9,900원 이하입니다.',
+    line: 14, code: '009999', originalCode: '01009999', currentPrice: 7000, newPrice: 5000,
+    restriction: '적용 가격이 7,000원 이하입니다.',
+    restoreRestriction: '적용 가격이 7,000원 이하입니다.',
   });
   state.plan.sourceText = state.plan.rows.map(row => [row.originalCode, row.currentPrice, row.newPrice].join('\t')).join('\n');
   return state;
@@ -238,31 +241,33 @@ test('all results are grouped once with effective restrictions and filters never
   const counts = await page.locator('#result-groups button').evaluateAll(buttons => Object.fromEntries(
     buttons.map(button => [button.dataset.resultGroup, Number(button.querySelector('.result-group-count').textContent)]),
   ));
-  assert.deepEqual(counts, {'': 14, ready: 1, missing: 1, price_condition: 3, completed: 4, additional: 5});
+  assert.deepEqual(counts, {'': 14, ready: 1, missing: 1, price_condition: 2, completed: 4, additional: 6});
   assert.equal(await page.locator('#result-groups [data-result-group=""]').getAttribute('aria-pressed'), 'true');
   assert.match(await page.locator('#work-count').innerText(), /총 14건/);
   assert.deepEqual(await page.locator('#price-rows tr[data-line]').evaluateAll(rows => rows.map(row => Number(row.dataset.line))),
-    [1, 2, 3, 4, 14, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    [1, 2, 4, 14, 5, 6, 7, 8, 3, 9, 10, 11, 12, 13]);
   assert.deepEqual(await page.locator('#price-rows .result-group-row').evaluateAll(rows => rows.map(row => row.dataset.resultGroup)),
     ['ready', 'missing', 'price_condition', 'completed', 'additional']);
   await page.locator('#result-groups [data-result-group="price_condition"]').click();
   assert.equal(await page.locator('#result-filter').inputValue(), 'price_condition');
-  assert.deepEqual(await page.locator('#price-rows tr[data-line]').evaluateAll(rows => rows.map(row => row.dataset.line)), ['3', '4', '14']);
+  assert.deepEqual(await page.locator('#price-rows tr[data-line]').evaluateAll(rows => rows.map(row => row.dataset.line)), ['4', '14']);
+  assert.match(await page.locator('#price-rows tr[data-line="4"]').innerText(), /7,000원 이하/);
+  assert.equal(await page.locator('#price-rows .result-group-row').count(), 0);
+  await page.locator('#result-groups [data-result-group="additional"]').click();
   const mismatch = page.locator('#price-rows tr[data-line="3"]');
   assert.match(await mismatch.innerText(), /기대 현재가 49,800원/);
   assert.equal(await mismatch.locator('.target-price').innerText(), '44,200원');
   assert.equal(await mismatch.locator('td.money').last().innerText(), '39,900원 / 45,900원');
-  assert.equal(await page.locator('#price-rows .result-group-row').count(), 0);
-  assert.match(await page.locator('#price-rows tr[data-line="4"]').innerText(), /할인율이 50%를 넘습니다/);
+  assert.match(await mismatch.innerText(), /재확인 필요/);
   await page.locator('#result-filter').selectOption('review');
-  assert.deepEqual(await page.locator('#price-rows tr[data-line]').evaluateAll(rows => rows.map(row => Number(row.dataset.line))), [2, 3, 4, 14, 9, 10, 11]);
+  assert.deepEqual(await page.locator('#price-rows tr[data-line]').evaluateAll(rows => rows.map(row => Number(row.dataset.line))), [2, 4, 14, 3, 9, 10, 11]);
   await page.locator('#result-filter').selectOption('pending_change');
   assert.deepEqual(await page.locator('#price-rows tr[data-line]').evaluateAll(rows => rows.map(row => Number(row.dataset.line))), [6, 7]);
   await page.locator('input[name="mode"][value="restore"]').check();
   assert.equal(await page.locator('#result-groups [data-result-group="price_condition"] .result-group-count').innerText(), '1');
   await page.locator('#result-groups [data-result-group="price_condition"]').click();
   assert.equal(await page.locator('#price-rows tr[data-line]').count(), 1);
-  assert.match(await page.locator('#price-rows').innerText(), /원가격이 9,900원 이하/);
+  assert.match(await page.locator('#price-rows').innerText(), /적용 가격이 7,000원 이하/);
   assert.equal(posts, 0);
 });
 
@@ -308,7 +313,7 @@ test('candidate-name searches combine with groups and survive a state refresh', 
     await respond(route, state);
   });
   await page.waitForFunction(() => !document.querySelector('#check-prices').disabled);
-  await page.locator('#result-filter').selectOption('price_condition');
+  await page.locator('#result-filter').selectOption('additional');
   await page.locator('#code-filter').fill('베이지 후보');
   assert.equal(await page.locator('#price-rows tr[data-line]').count(), 1);
   assert.match(await page.locator('#price-rows').innerText(), /블랙 후보 니트/);
@@ -316,14 +321,15 @@ test('candidate-name searches combine with groups and survive a state refresh', 
   assert.equal(await page.locator('#work-count').innerText(), '1 / 14건 · 저장 확인 1건');
   assert.equal(await page.locator('#result-groups [data-result-group=""] .result-group-count').innerText(), '1');
   assert.equal(await page.locator('#result-groups [data-result-group="ready"] .result-group-count').innerText(), '0');
-  assert.equal(await page.locator('#result-groups [data-result-group="price_condition"]').getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.locator('#result-groups [data-result-group="additional"]').getAttribute('aria-pressed'), 'true');
   state.message = '조회 결과 갱신 완료';
   await page.waitForFunction(() => document.querySelector('#status-message').textContent === '조회 결과 갱신 완료');
   assert.equal(await page.locator('#code-filter').inputValue(), '베이지 후보');
-  assert.equal(await page.locator('#result-filter').inputValue(), 'price_condition');
-  await page.locator('#result-groups [data-result-group="additional"]').click();
+  assert.equal(await page.locator('#result-filter').inputValue(), 'additional');
+  await page.locator('#result-groups [data-result-group="price_condition"]').click();
   assert.equal(await page.locator('#price-rows tr[data-line]').count(), 0);
   assert.equal(await page.locator('#no-filter-results').isVisible(), true);
+  await page.locator('#result-groups [data-result-group="additional"]').click();
   await page.locator('#code-filter').fill('이름으로 찾을');
   assert.deepEqual(await page.locator('#price-rows tr[data-line]').evaluateAll(rows => rows.map(row => row.dataset.line)), ['9']);
   assert.equal(posts, 0);
@@ -432,9 +438,6 @@ test('discount-price click validates whole won amounts and Escape cancels withou
     await page.locator('#price-edit-value').press('Enter');
     assert.match(await page.locator('#price-edit-message').innerText(), /정수/);
   }
-  await page.locator('#price-edit-value').fill('49,801');
-  await page.locator('#price-edit-value').press('Enter');
-  assert.match(await page.locator('#price-edit-message').innerText(), /원가격 49,800원 이하/);
   await page.locator('#price-edit-value').press('Escape');
   assert.equal(await page.locator('#price-edit-dialog').isVisible(), false);
   assert.equal(await page.locator('[data-action="edit-price"]').innerText(), '44,200원');
@@ -458,16 +461,16 @@ test('saving one manual price preserves schedule, filters and original memo and 
       mutations.push({endpoint, payload: request.postDataJSON()});
       if (endpoint === '/api/plan/price') {
         await saving;
-        state.plan.rows[0] = {...state.plan.rows[0], newPrice: 40000, uploadedNewPrice: 44200, priceRevision: 1};
+        state.plan.rows[0] = {...state.plan.rows[0], newPrice: 50000, uploadedNewPrice: 44200, priceRevision: 1};
         state.results = {};
-        state.message = '할인판매가를 40,000원으로 수정했습니다. 현재가를 다시 조회해 주세요.';
+        state.message = '할인판매가를 50,000원으로 수정했습니다. 현재가를 다시 조회해 주세요.';
       } else if (endpoint === '/api/portal/check') {
         state.results = {1: {status: 'ready', expectedPrice: 49800, targetPrice: state.plan.rows[0].newPrice, offer: {currentPrice: 49800}}};
         state.message = '새 금액 조회 완료';
       } else if (endpoint === '/api/portal/stage') {
-        assert.equal(state.results[1].targetPrice, 40000);
+        assert.equal(state.results[1].targetPrice, 50000);
         state.results[1].status = 'pending';
-        state.message = '포털에 40,000원 입력 · 직접 저장 확인';
+        state.message = '포털에 50,000원 입력 · 직접 저장 확인';
       } else assert.fail('Unexpected operation: ' + endpoint);
     }
     await respond(route, state);
@@ -478,7 +481,7 @@ test('saving one manual price preserves schedule, filters and original memo and 
   await page.locator('#code-filter').fill('001234');
   await page.locator('#result-filter').selectOption('ready');
   await page.locator('[data-action="edit-price"]').click();
-  await page.locator('#price-edit-value').fill('40,000');
+  await page.locator('#price-edit-value').fill('50,000');
   await page.locator('#price-edit-value').press('Enter');
   await page.waitForFunction(() => document.querySelector('#price-edit-save').disabled);
   await page.locator('#price-edit-form').dispatchEvent('submit');
@@ -490,7 +493,7 @@ test('saving one manual price preserves schedule, filters and original memo and 
   releaseSave();
   await page.waitForFunction(() => !document.querySelector('#price-edit-dialog').open);
   assert.deepEqual(mutations, [{endpoint: '/api/plan/price', payload: {
-    line: 1, originalCode: '01001234', newPrice: 40000, expectedPrice: 44200,
+    line: 1, originalCode: '01001234', newPrice: 50000, expectedPrice: 44200,
   }}]);
   assert.equal(await page.locator('#schedule-date').inputValue(), '2099-06-07');
   assert.equal(await page.locator('#schedule-hour').inputValue(), '03');
@@ -501,12 +504,12 @@ test('saving one manual price preserves schedule, filters and original memo and 
   assert.match(await page.locator('#status-message').innerText(), /현재가를 다시 조회/);
   assert.equal(await page.locator('[data-action="stage"]').count(), 0);
   await page.locator('#result-filter').selectOption('unchecked');
-  assert.equal(await page.locator('[data-action="edit-price"]').innerText(), '40,000원');
+  assert.equal(await page.locator('[data-action="edit-price"]').innerText(), '50,000원');
   assert.equal(await page.locator('.price-original-note').innerText(), '업로드 44,200원');
   await page.locator('#check-prices').click();
   await page.locator('[data-action="stage"]').waitFor();
   await page.locator('[data-action="stage"]').click();
-  await page.waitForFunction(() => document.querySelector('#status-message').textContent.includes('40,000원 입력'));
+  await page.waitForFunction(() => document.querySelector('#status-message').textContent.includes('50,000원 입력'));
   assert.deepEqual(mutations.slice(1), [
     {endpoint: '/api/portal/check', payload: {mode: 'discount'}},
     {endpoint: '/api/portal/stage', payload: {line: 1, mode: 'discount', date: '2099-06-07', hour: '03'}},

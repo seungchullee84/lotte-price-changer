@@ -50,7 +50,7 @@ const statusLabels = {
   saved: "저장 확인",
   missing: "상품 없음",
   ambiguous: "상품 확인 필요",
-  mismatch: "가격 불일치",
+  mismatch: "재확인 필요",
   pending: "확인 대기",
   error: "처리 오류",
   interrupted: "처리 중단",
@@ -60,9 +60,9 @@ const restoreStatusLabels = { already: "이미 원가격", saved: "복구 예약
 const resultGroups = [
   {value: "ready", label: "변경 대상", statuses: ["ready"]},
   {value: "missing", label: "상품 없음", statuses: ["missing"]},
-  {value: "price_condition", label: "가격 조건 불일치", statuses: ["mismatch", "blocked"]},
+  {value: "price_condition", label: "가격 조건 불일치", statuses: ["blocked"]},
   {value: "completed", label: "적용 완료·진행 중", statuses: ["already", "scheduled", "pending_change", "saved"]},
-  {value: "additional", label: "추가 확인", statuses: ["unchecked", "pending", "ambiguous", "error", "interrupted"]},
+  {value: "additional", label: "추가 확인", statuses: ["unchecked", "pending", "ambiguous", "mismatch", "error", "interrupted"]},
 ];
 const filterStatuses = {
   ...Object.fromEntries(resultGroups.map(group => [group.value, group.statuses])),
@@ -170,9 +170,7 @@ function currentResults() {
 function resultForRow(row, results) {
   const result = results[row.line];
   if (result && result.status !== "pending") return result;
-  const restriction = mode === "discount"
-    ? row.restriction
-    : row.currentPrice <= 9900 && "원가격이 9,900원 이하라 복구할 수 없습니다.";
+  const restriction = mode === "discount" ? row.restriction : row.restoreRestriction;
   return restriction ? {status: "blocked", message: restriction} : result;
 }
 
@@ -361,14 +359,14 @@ function openPriceEditor(line) {
   if (!row) return;
   priceEdit = {
     line, originalCode: row.originalCode, expectedPrice: row.newPrice,
-    currentPrice: row.currentPrice, planIdentity: planIdentity(state.plan),
+    planIdentity: planIdentity(state.plan),
   };
   controls.priceInput.value = String(row.newPrice);
   controls.priceInput.setAttribute("aria-label", row.originalCode + " 할인 판매가");
   controls.priceInput.setCustomValidity("");
   controls.priceMessage.textContent = "";
   byId("price-edit-product").textContent = "품번 " + row.originalCode + " · 원가격 " + priceLabel(row.currentPrice);
-  byId("price-edit-hint").textContent = "원 단위로 입력하세요. 9,900원 이하 또는 50% 초과 할인은 적용이 제한됩니다.";
+  byId("price-edit-hint").textContent = "원 단위로 입력하세요.";
   refreshControls();
   renderNotice();
   controls.priceDialog.showModal();
@@ -384,8 +382,6 @@ controls.priceForm.addEventListener("submit", event => {
   let issue = "";
   if (!/^(?:\d+|\d{1,3}(?:,\d{3})+)$/.test(text) || !Number.isSafeInteger(newPrice) || newPrice <= 0) {
     issue = "할인 판매가는 1원 이상의 정수로 입력하세요. 예: 44,200";
-  } else if (newPrice > priceEdit.currentPrice) {
-    issue = "할인 판매가는 원가격 " + priceLabel(priceEdit.currentPrice) + " 이하여야 합니다.";
   }
   controls.priceInput.setCustomValidity(issue);
   controls.priceMessage.textContent = issue;

@@ -169,7 +169,7 @@ function matchesSavedDiscount(row, offer, history, now) {
         (change.effective === latest.effective && change.verified >= latest.verified)) latest = change;
   }
   return latest?.mode === 'discount' && latest.originalCode === row.originalCode &&
-    latest.fromPrice === row.currentPrice && latest.toPrice < latest.fromPrice && latest.toPrice === offer.currentPrice;
+    latest.fromPrice === row.currentPrice && latest.toPrice === offer.currentPrice;
 }
 
 export function reconcileRow(row, offers, mode, history) {
@@ -189,11 +189,13 @@ export function reconcileRow(row, offers, mode, history) {
   const matches = offers.filter(offer => offer.currentPrice === expectedPrice ||
     (restoring && matchesSavedDiscount(row, offer, history, now)));
   if (matches.length > 1) return { ...prices, status: 'ambiguous', offers: matches };
-  if (matches.length === 1) {
-    const [offer] = matches;
+  if (matches.length === 1 || offers.length === 1) {
+    const offer = matches[0] ?? offers[0];
     const existing = progress(offer);
     const result = { ...prices, expectedPrice: offer.currentPrice, ...(existing ?? { status: 'ready', offer }) };
-    if (!existing && offer.currentPrice !== expectedPrice) result.message = '저장 기록에서 적용된 할인 판매가 확인';
+    if (!existing && offer.currentPrice !== expectedPrice) {
+      result.message = matches.length ? '저장 기록에서 적용된 할인 판매가 확인' : '포털 현재가 기준';
+    }
     return result;
   }
 
@@ -201,10 +203,5 @@ export function reconcileRow(row, offers, mode, history) {
   if (atTarget.length > 1) return { ...prices, status: 'ambiguous', offers: atTarget };
   if (atTarget.length === 1) return { ...prices, ...progress(atTarget[0]) };
 
-  if (offers.length === 1) {
-    const existing = progress(offers[0]);
-    if (existing) return { ...prices, ...existing };
-  }
-
-  return { ...prices, status: 'mismatch', offers };
+  return { ...prices, status: 'ambiguous', offers };
 }

@@ -40,17 +40,7 @@ const routes = new Map([
 
 function restriction(row, mode) {
   const target = mode === 'restore' ? row.currentPrice : row.newPrice;
-  const reasons = [];
-  if (target <= 9900) reasons.push('판매가가 9,900원 이하입니다.');
-  if (mode === 'discount') {
-    const floor = Math.ceil(row.currentPrice / 2);
-    if (target < floor) {
-      reasons.push('할인율이 50%를 넘습니다. 이 상품의 할인 하한은 ' + money.format(floor) + '원입니다.');
-    } else if (target > row.currentPrice) {
-      reasons.push('할인 판매가가 원가격보다 높습니다.');
-    }
-  }
-  return reasons.join(' ');
+  return target <= 7000 ? '적용 가격이 7,000원 이하입니다.' : '';
 }
 
 function scheduleNearNow() {
@@ -186,7 +176,6 @@ try {
       const result = savedRun.results?.[row.line];
       const targetPrice = mode === 'restore' ? row.currentPrice : row.newPrice;
       const stale = (savedRun.rowRevisions?.[row.line] ?? '') !== (row.priceRevision ?? '') ||
-        (mode === 'discount' && result?.expectedPrice !== undefined && result.expectedPrice !== row.currentPrice) ||
         (result?.targetPrice !== undefined && result.targetPrice !== targetPrice);
       if (stale && result?.needsReview) {
         results[row.line] = { ...result, status: 'interrupted',
@@ -194,17 +183,22 @@ try {
         continue;
       }
       if (stale) continue;
+      const reason = restriction(row, mode);
       if (result?.status === 'saved' || isStagedInput(result)) results[row.line] = result;
       else if (result?.needsReview) results[row.line] = {
         ...result, status: 'interrupted', message: '이전 작업이 중단되었습니다. 현재가 조회로 포털 저장 결과를 확인하세요.',
       };
+      else if (reason) results[row.line] = blockedResult(row, mode, reason);
       else if (result?.status === 'ready' && result.offer) {
-        // Every subsequent write still queries the portal and validates the exact offer again.
+        // Writes recheck the exact portal offer and its observed price.
         results[row.line] = reconcileRow(row, [result.offer], mode, priceChanges);
-      } else if (['already', 'scheduled', 'pending_change', 'missing', 'ambiguous', 'mismatch', 'blocked', 'error'].includes(result?.status)) {
+      } else if (result?.status === 'mismatch' && !result.message && result.offers?.length) {
+        results[row.line] = reconcileRow(row, result.offers, mode, priceChanges);
+      } else if (['already', 'scheduled', 'pending_change', 'missing', 'ambiguous', 'mismatch', 'error'].includes(result?.status)) {
         results[row.line] = result;
       }
     }
+    markOverlappingOffers(plan.rows);
   }
 } catch (error) {
   if (error.code !== 'ENOENT') {
@@ -249,7 +243,9 @@ function publicState() {
   const scheduledAt = Date.parse(storedSchedule?.date + 'T' + storedSchedule?.hour + ':00:00+09:00');
   const schedule = scheduledAt > Date.now() ? storedSchedule : scheduleNearNow();
   return {
-    plan: plan && { ...plan, rows: plan.rows.map(row => ({ ...row, restriction: restriction(row, 'discount') })) },
+    plan: plan && { ...plan, rows: plan.rows.map(row => ({ ...row,
+      restriction: restriction(row, 'discount'), restoreRestriction: restriction(row, 'restore'),
+    })) },
     mode,
     results,
     busy,
@@ -269,6 +265,23 @@ function blockedResult(row, operation, reason) {
     status: 'blocked',
     message: reason,
   };
+}
+
+function markOverlappingOffers(rows) {
+  const counts = new Map();
+  for (const row of rows) {
+    const offer = results[row.line]?.offer;
+    if (!offer) continue;
+    const key = JSON.stringify([row.code, offer.id]);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  for (const row of rows) {
+    const result = results[row.line];
+    if (result?.status === 'ready' && counts.get(JSON.stringify([row.code, result.offer.id])) > 1) {
+      result.status = 'ambiguous';
+      result.message = '같은 포털 상품이 목록의 여러 행과 일치합니다.';
+    }
+  }
 }
 
 async function checkPrices(onCheckedGroup) {
@@ -295,15 +308,7 @@ async function checkPrices(onCheckedGroup) {
         if (result.status === 'missing') result.message = '검색 결과 없음 · 건너뜀';
         results[row.line] = result;
       }
-      for (const row of rows) {
-        const result = results[row.line];
-        if (result.status !== 'ready') continue;
-        const overlaps = rows.some(other => other !== row && results[other.line].offer?.id === result.offer.id);
-        if (overlaps) {
-          result.status = 'ambiguous';
-          result.message = '같은 포털 상품이 목록의 여러 행과 일치합니다.';
-        }
-      }
+      markOverlappingOffers(rows);
     } catch (error) {
       await logError('query:' + code, error);
       for (const row of rows) results[row.line] = { status: 'error', message: error.message };
@@ -529,7 +534,6 @@ async function editPlanPrice(body) {
   if (Object.values(results).some(result => result.status === 'pending' || result.needsReview)) {
     throw Object.assign(new Error('포털에 입력 중이거나 저장 확인이 필요한 상품이 있습니다. 현재가를 다시 조회한 뒤 수정해 주세요.'), { status: 409 });
   }
-  if (body.newPrice > row.currentPrice) throw new Error('할인판매가는 원가격보다 높게 입력할 수 없습니다.');
   if (body.newPrice === row.newPrice) {
     message = row.code + ' · 할인판매가가 같습니다. 기존 조회·저장 결과를 유지합니다.';
     return;

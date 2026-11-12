@@ -142,4 +142,26 @@ test('server skips applied/pending rows, persists outcomes and reuses authentica
   assert.equal(recovered.results['2'].status, 'saved');
   assert.equal(recovered.results['2'].expectedPrice, 15000);
   assert.equal(recovered.plan.rows[1].newPrice, 14000);
+
+  const boundaryRows = ['01000006\t7001\t7000', '01000007\t7000\t7001',
+    '01000008\t50000\t7001', '01000009\t18000\t21000'];
+  assert.equal((await request('/api/import', { sourceText: boundaryRows.join('\n') })).status, 200);
+  assert.equal((await request('/api/portal/check', { mode: 'discount' })).status, 200);
+  const discount = await idle();
+  assert.deepEqual(Object.values(discount.results).map(result => result.status), ['blocked', 'ready', 'ready', 'ready']);
+  assert.match(discount.results[1].message, /7,000원 이하/);
+  assert.equal(discount.results[3].expectedPrice, 20000);
+  assert.equal((await request('/api/portal/stage', { ...schedule, line: 1 })).status, 400);
+  assert.equal((await readStages()).length, 3);
+  assert.equal((await request('/api/portal/check-and-run', schedule)).status, 200);
+  await idle();
+  assert.deepEqual((await readStages()).slice(3).map(({code, expected, target}) => [code, expected, target]),
+    [['000007', 20000, 7001], ['000008', 20000, 7001], ['000009', 20000, 21000]]);
+
+  assert.equal((await request('/api/portal/check', { mode: 'restore' })).status, 200);
+  const restore = await idle();
+  assert.deepEqual(Object.values(restore.results).map(result => result.status), ['ready', 'blocked', 'ready', 'ready']);
+  assert.match(restore.plan.rows[1].restoreRestriction, /7,000원 이하/);
+  assert.equal(restore.results[1].targetPrice, 7001);
+  assert.equal((await readStages()).length, 6);
 });

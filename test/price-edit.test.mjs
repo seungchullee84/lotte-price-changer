@@ -130,7 +130,7 @@ test('manual discount prices persist separately from uploaded originals and feed
   const revision = state.plan.rows[0].priceRevision;
   assert.equal((await app.request('/api/plan/price', edit(21000))).status, 409);
   assert.equal((await app.request('/api/plan/price', { ...edit(21000, 22000), originalCode: '01999999' })).status, 409);
-  for (const invalid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '21000', null, 31000]) {
+  for (const invalid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '21000', null]) {
     assert.equal((await app.request('/api/plan/price', edit(invalid, 22000))).status, 400);
   }
   assert.equal((await app.state()).plan.rows[0].priceRevision, revision);
@@ -165,8 +165,13 @@ test('manual discount prices persist separately from uploaded originals and feed
   assert.deepEqual(stages.map(item => [item.offer.code, item.target, item.save]),
     [['000001', 22000, false], ['000001', 21000, true], ['000002', 25000, true]]);
 
-  state = await (await app.request('/api/plan/price', edit(9000, 21000))).json();
-  assert.match(state.plan.rows[0].restriction, /9,900원 이하/);
+  state = await (await app.request('/api/plan/price', edit(7000, 21000))).json();
+  assert.match(state.plan.rows[0].restriction, /7,000원 이하/);
+  state = await (await app.request('/api/plan/price', edit(7001, 7000))).json();
+  assert.equal(state.plan.rows[0].restriction, '');
+  state = await (await app.request('/api/plan/price', edit(31000, 7001))).json();
+  assert.equal(state.plan.rows[0].newPrice, 31000);
+  assert.equal(state.plan.rows[0].restriction, '');
   assert.equal(state.results['2'].status, 'saved');
   assert.equal(await readFile(archiveFile, 'utf8'), archiveBytes);
   assert.equal(await (await app.request('/api/history/' + currentId + '/download')).text(), sourceText);
@@ -264,6 +269,26 @@ test('failed price snapshots preserve state and stale run results cannot return 
   assert.equal(state.results['1'], undefined, 'Old saved results must not revive when the edited price commits first');
   assert.deepEqual(state.results['2'], before.results['2']);
   await rm(runFile + '.tmp', { recursive: true });
+});
+
+test('startup reclassifies saved lookups under the new price limit without reviving blocked rows', async t => {
+  const rows = parseMemo(sourceText).rows;
+  rows[1] = { ...rows[1], newPrice: 9000, uploadedNewPrice: 25000,
+    priceUpdatedAt: '2026-11-02T00:00:00Z', priceRevision: '0123456789abcdef' };
+  const old = initialResults();
+  const observed = { ...old[1].offer, currentPrice: 26700 };
+  const results = {
+    1: { status: 'mismatch', expectedPrice: 30000, targetPrice: 25000, offers: [observed] },
+    2: { status: 'blocked', expectedPrice: 30000, targetPrice: 9000, message: '이전 가격 제한' },
+  };
+  const app = await fixture(t, { rows, results, rowRevisions: { 2: rows[1].priceRevision } });
+  const state = await app.state();
+  assert.equal(state.results[1].status, 'ready');
+  assert.equal(state.results[1].expectedPrice, 26700);
+  assert.deepEqual(state.results[1].offer, observed);
+  assert.equal(state.results[2], undefined);
+  assert.equal(state.plan.rows[1].restriction, '');
+  assert.deepEqual((await app.restart()).results, state.results);
 });
 
 test('startup drops mismatched target results but retains uncertainty as a barrier to editing', async t => {
