@@ -19,7 +19,6 @@ const controls = {
   modes: [...document.querySelectorAll('input[name="mode"]')],
   search: byId("code-filter"),
   filter: byId("result-filter"),
-  groups: byId("result-groups"),
   rows: byId("price-rows"),
   priceDialog: byId("price-edit-dialog"),
   priceForm: byId("price-edit-form"),
@@ -29,6 +28,8 @@ const controls = {
   priceMessage: byId("price-edit-message"),
 };
 
+const filterOptions = [...controls.filter.options].filter(option => option.value)
+  .map(option => ({option, label: option.textContent}));
 const moneyFormat = new Intl.NumberFormat("ko-KR");
 const dateTimeFormat = new Intl.DateTimeFormat("ko-KR", {
   timeZone: "Asia/Seoul",
@@ -121,7 +122,6 @@ function refreshControls() {
   const stageBlocked = hasUnresolvedInput({allowStaged: true});
   const haveRows = (state?.plan?.rows.length ?? 0) > 0;
   const restoring = mode === "restore";
-  byId("restore-help").hidden = !restoring;
   controls.run.textContent = restoring ? "복구 대상만 예약" : "변경 대상만 적용";
   controls.checkAndRun.textContent = restoring ? "조회 후 복구 예약" : "조회 후 바로 적용";
   controls.portal.disabled = locked || editingPrice;
@@ -200,13 +200,15 @@ function rowMatches(row, result, query, filter) {
 function makeRow(row, result) {
   const tr = element("tr");
   tr.dataset.line = String(row.line);
-  const originalCode = element("td");
-  originalCode.append(element("span", row.originalCode, "code"));
-  for (const name of candidateNames(result)) originalCode.append(element("span", name, "result-message"));
-  tr.append(originalCode, element("td", row.code, "code"));
+  const productCell = element("td", undefined, "product-cell");
+  const code = element("span", undefined, "code");
+  code.append(element("span", row.originalCode.slice(0, 2), "code-prefix"), row.code);
+  productCell.append(code);
+  for (const name of candidateNames(result)) productCell.append(element("span", name, "result-message"));
+  tr.append(productCell);
 
-  const originalPrice = element("td", priceLabel(row.currentPrice), "money");
-  const discountPrice = element("td", undefined, "money");
+  const originalPrice = element("td", priceLabel(row.currentPrice), "money original-price");
+  const discountPrice = element("td", undefined, "money discount-price");
   const editPrice = element("button", priceLabel(row.newPrice), "price-edit-button");
   editPrice.type = "button";
   editPrice.dataset.action = "edit-price";
@@ -220,25 +222,29 @@ function makeRow(row, result) {
   target.classList.add("target-price");
   const observedPrices = [...new Set(candidateOffers(result).map(offer => offer.currentPrice).filter(Number.isSafeInteger))];
   const observedLabel = observedPrices.map(priceLabel).join(" / ") || "—";
-  tr.append(originalPrice, discountPrice, element("td", observedLabel, "money"));
+  const observedPrice = element("td", observedLabel, "money observed-price");
+  for (const [cell, title] of [[originalPrice, "원가격"], [discountPrice, "할인 판매가"], [observedPrice, "포털 현재가"]]) {
+    const label = element("span", title, "price-cell-label");
+    label.setAttribute("aria-hidden", "true");
+    cell.prepend(label);
+  }
+  tr.append(originalPrice, discountPrice, observedPrice);
 
   const status = result?.status ?? "unchecked";
-  const statusCell = element("td");
+  const statusCell = element("td", undefined, "status-cell");
   let label = (mode === "restore" && restoreStatusLabels[status]) || statusLabels[status];
   if (status === "pending" && !state?.busy) label = "포털 확인";
   const tag = element("span", label ?? "확인 필요", "tag");
   if (Object.hasOwn(statusLabels, status)) tag.classList.add("tag-" + status);
   statusCell.append(tag);
-  if (result?.offer?.channel || result?.message) {
-    statusCell.append(element("span", [result.offer?.channel, result.message].filter(Boolean).join(" · "), "result-message"));
+  if (result?.message && !["missing", "already", "scheduled", "saved"].includes(status)) {
+    statusCell.append(element("span", result.message, "result-message"));
   }
   if (status === "mismatch") {
     const expected = result.expectedPrice ?? (mode === "restore" ? row.newPrice : row.currentPrice);
-    const targetPrice = result.targetPrice ?? (mode === "restore" ? row.currentPrice : row.newPrice);
-    statusCell.append(element("span", "기대 현재가 " + priceLabel(expected) + " · 변경 목표가 " + priceLabel(targetPrice) +
-      " · 포털 현재가 " + observedLabel, "result-message"));
+    statusCell.append(element("span", "기대 현재가 " + priceLabel(expected), "result-message"));
   }
-  const actionCell = element("td");
+  const actionCell = element("td", undefined, "action-cell");
   if (status === "ready") {
     const button = element("button", mode === "restore" ? "복구가 입력" : "포털 입력", "button button-outline button-table");
     button.type = "button";
@@ -256,9 +262,6 @@ function renderRows() {
   const rows = state?.plan?.rows ?? [];
   const results = currentResults();
   const savedCount = Object.values(results).filter((result) => result?.status === "saved").length;
-  const totalLabel = rows.length ? "총 " + moneyFormat.format(rows.length) + "건" : "";
-  const savedLabel = savedCount ? "저장 확인 " + moneyFormat.format(savedCount) + "건" : "";
-  byId("work-count").textContent = [totalLabel, savedLabel].filter(Boolean).join(" · ");
   byId("empty-state").hidden = !state || rows.length > 0;
   byId("list-view").hidden = !rows.length;
   const query = controls.search.value.trim().toLocaleLowerCase("ko-KR");
@@ -269,43 +272,46 @@ function renderRows() {
     const group = resultGroups.find(item => item.statuses.includes(status)) ?? resultGroups.at(-1);
     return {row, result, group};
   }).filter(({row, result}) => rowMatches(row, result, query, ""));
-  for (const button of controls.groups.querySelectorAll("button[data-result-group]")) {
-    const value = button.dataset.resultGroup;
-    const count = value ? matchingSearch.filter(item => item.group.value === value).length : matchingSearch.length;
-    button.querySelector(".result-group-count").textContent = moneyFormat.format(count);
-    button.setAttribute("aria-pressed", String(filter === value));
+  for (const {option, label} of filterOptions) {
+    const count = matchingSearch.filter(({row, result}) => rowMatches(row, result, "", option.value)).length;
+    option.textContent = label + " · " + moneyFormat.format(count);
   }
   const filtered = matchingSearch.filter(({row, result}) => rowMatches(row, result, "", filter));
+  const showGroupHeadings = !filter && new Set(filtered.map(({group}) => group)).size > 1;
   const tableRows = [];
   for (const group of resultGroups) {
     const groupRows = filtered.filter(item => item.group === group);
-    if (!groupRows.length) continue;
-    const heading = element("tr", undefined, "result-group-row");
-    heading.dataset.resultGroup = group.value;
-    const headingCell = element("th", group.label + " · " + moneyFormat.format(groupRows.length) + "건");
-    headingCell.colSpan = 7;
-    heading.append(headingCell);
-    tableRows.push(heading, ...groupRows.map(({row, result}) => makeRow(row, result)));
+    if (showGroupHeadings && groupRows.length) {
+      const heading = element("tr", undefined, "result-group-row");
+      heading.dataset.resultGroup = group.value;
+      const headingCell = element("th", group.label + " · " + moneyFormat.format(groupRows.length) + "건");
+      headingCell.colSpan = 6;
+      heading.append(headingCell);
+      tableRows.push(heading);
+    }
+    tableRows.push(...groupRows.map(({row, result}) => makeRow(row, result)));
   }
   controls.rows.replaceChildren(...tableRows);
   byId("no-filter-results").hidden = filtered.length > 0;
-  byId("filter-count").textContent = filtered.length !== rows.length
-    ? moneyFormat.format(filtered.length) + "건 표시"
-    : "";
+  const total = moneyFormat.format(rows.length);
+  const count = filtered.length === rows.length ? "총 " + total + "건" : moneyFormat.format(filtered.length) + " / " + total + "건";
+  const saved = savedCount ? "저장 확인 " + moneyFormat.format(savedCount) + "건" : "";
+  byId("work-count").textContent = rows.length ? [count, saved].filter(Boolean).join(" · ") : "";
 }
 
 function renderImport() {
   const plan = state?.plan;
-  byId("plan-summary").textContent = plan
-    ? ["저장된 목록 " + moneyFormat.format(plan.rows.length) + "건", plan.sourceName, importedAtLabel(plan.importedAt)]
-      .filter(Boolean).join(" · ")
+  const summary = byId("plan-summary");
+  summary.textContent = plan
+    ? [plan.sourceName || "붙여넣은 목록", importedAtLabel(plan.importedAt)].filter(Boolean).join(" · ")
     : "";
+  summary.title = summary.textContent;
   byId("import-hint").textContent = selectedFileName
     ? selectedFileName + " · 목록 저장을 누르세요."
-    : "엑셀 첫 시트의 A열은 품번, B열은 원가격, C열은 할인 판매가입니다.";
+    : "엑셀 첫 시트의 A~C열을 사용합니다.";
   const errors = plan?.errors ?? [];
   byId("import-errors").hidden = !errors.length;
-  byId("import-error-title").textContent = "확인이 필요한 행 " + moneyFormat.format(errors.length) + "건";
+  byId("import-error-title").textContent = "확인 필요 " + moneyFormat.format(errors.length) + "행";
   byId("import-error-list").replaceChildren(...errors.map(({line, message}) =>
     element("li", (line ? line + "행 · " : "") + message)));
 }
@@ -319,7 +325,6 @@ function renderHistory() {
   const history = state?.history ?? [];
   const previousSelection = controls.historySelect.value;
   controls.history.hidden = !history.length;
-  byId("history-count").textContent = history.length ? moneyFormat.format(history.length) + "개 보관" : "";
   controls.historySelect.replaceChildren(
     new Option("보관된 목록 선택", ""),
     ...history.map(({id, importedAt, rowCount, sourceName, current}) => {
@@ -362,7 +367,7 @@ function openPriceEditor(line) {
   controls.priceInput.setCustomValidity("");
   controls.priceMessage.textContent = "";
   byId("price-edit-product").textContent = "품번 " + row.originalCode + " · 원가격 " + priceLabel(row.currentPrice);
-  byId("price-edit-hint").textContent = "1원 단위로 " + priceLabel(row.currentPrice) + " 이하를 입력하세요. 9,900원 이하 또는 50% 초과 할인은 저장 후 적용이 제한됩니다.";
+  byId("price-edit-hint").textContent = "원 단위로 입력하세요. 9,900원 이하 또는 50% 초과 할인은 적용이 제한됩니다.";
   refreshControls();
   renderNotice();
   controls.priceDialog.showModal();
@@ -432,7 +437,7 @@ function renderNotice() {
   }
   if (!state?.busy && hasStagedInput()) {
     const next = mode === state.mode ? (mode === "restore" ? "다음 상품의 복구가 입력" : "다음 상품의 포털 입력") : "입력 상태 확인";
-    message = [message, "포털에서 저장하거나 입력을 지운 뒤 " + next + "을 눌러 주세요."].filter(Boolean).join(" ");
+    message = [message, "포털에서 저장하거나 입력을 지운 뒤 " + next + "을 눌러 주세요."].filter(Boolean).join(". ");
   }
   if (!isLocked() && isDraftEdited()) message = "목록을 저장한 뒤 현재가를 조회하세요.";
   if (priceEdit) message = priceEdit.originalCode + " 할인 판매가를 편집 중입니다. 확인으로 저장하거나 취소하세요.";
@@ -725,14 +730,6 @@ for (const filter of [controls.search, controls.filter]) {
   });
 }
 
-controls.groups.addEventListener("click", event => {
-  const button = event.target.closest("button[data-result-group]");
-  if (!button) return;
-  controls.filter.value = button.dataset.resultGroup;
-  renderRows();
-  refreshControls();
-});
-
 controls.rows.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-line]");
   if (!button || button.disabled) return;
@@ -746,15 +743,6 @@ controls.hour.append(new Option("시각 선택", ""));
 for (let hour = 0; hour < 24; hour++) {
   const value = String(hour).padStart(2, "0");
   controls.hour.append(new Option(value + "시", value));
-}
-
-for (const group of [{value: "", label: "전체"}, ...resultGroups]) {
-  const button = element("button", undefined, "result-group-button");
-  button.type = "button";
-  button.dataset.resultGroup = group.value;
-  button.setAttribute("aria-pressed", String(group.value === ""));
-  button.append(element("span", group.label), element("span", "0", "result-group-count"));
-  controls.groups.append(button);
 }
 
 render();

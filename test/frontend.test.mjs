@@ -235,26 +235,31 @@ test('all results are grouped once with effective restrictions and filters never
     await respond(route, state);
   });
   await page.waitForFunction(() => !document.querySelector('#check-prices').disabled);
-  const counts = await page.locator('#result-groups button').evaluateAll(buttons => Object.fromEntries(
-    buttons.map(button => [button.dataset.resultGroup, Number(button.querySelector('.result-group-count').textContent)]),
+  const counts = await page.locator('#result-filter > option[value]:not([value=""])').evaluateAll(options => Object.fromEntries(
+    options.map(option => [option.value, Number(option.textContent.split(' · ').at(-1))]),
   ));
-  assert.deepEqual(counts, {'': 14, ready: 1, missing: 1, price_condition: 3, completed: 4, additional: 5});
+  assert.deepEqual(counts, {ready: 1, missing: 1, price_condition: 3, completed: 4, additional: 5});
+  assert.match(await page.locator('#work-count').innerText(), /총 14건/);
   assert.deepEqual(await page.locator('#price-rows tr[data-line]').evaluateAll(rows => rows.map(row => Number(row.dataset.line))),
     [1, 2, 3, 4, 14, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   assert.deepEqual(await page.locator('#price-rows .result-group-row').evaluateAll(rows => rows.map(row => row.dataset.resultGroup)),
     ['ready', 'missing', 'price_condition', 'completed', 'additional']);
-  await page.locator('[data-result-group="price_condition"][type="button"]').click();
+  await page.locator('#result-filter').selectOption('price_condition');
   assert.equal(await page.locator('#result-filter').inputValue(), 'price_condition');
   assert.deepEqual(await page.locator('#price-rows tr[data-line]').evaluateAll(rows => rows.map(row => row.dataset.line)), ['3', '4', '14']);
-  assert.match(await page.locator('#price-rows tr[data-line="3"]').innerText(), /기대 현재가 49,800원.*변경 목표가 44,200원.*포털 현재가 39,900원 \/ 45,900원/s);
+  const mismatch = page.locator('#price-rows tr[data-line="3"]');
+  assert.match(await mismatch.innerText(), /기대 현재가 49,800원/);
+  assert.equal(await mismatch.locator('.target-price').innerText(), '44,200원');
+  assert.equal(await mismatch.locator('td.money').last().innerText(), '39,900원 / 45,900원');
+  assert.equal(await page.locator('#price-rows .result-group-row').count(), 0);
   assert.match(await page.locator('#price-rows tr[data-line="4"]').innerText(), /할인율이 50%를 넘습니다/);
   await page.locator('#result-filter').selectOption('review');
   assert.deepEqual(await page.locator('#price-rows tr[data-line]').evaluateAll(rows => rows.map(row => Number(row.dataset.line))), [2, 3, 4, 14, 9, 10, 11]);
   await page.locator('#result-filter').selectOption('pending_change');
   assert.deepEqual(await page.locator('#price-rows tr[data-line]').evaluateAll(rows => rows.map(row => Number(row.dataset.line))), [6, 7]);
   await page.locator('input[name="mode"][value="restore"]').check();
-  assert.equal(await page.locator('[data-result-group="price_condition"][type="button"] .result-group-count').innerText(), '1');
-  await page.locator('[data-result-group="price_condition"][type="button"]').click();
+  assert.match(await page.locator('#result-filter option[value="price_condition"]').innerText(), / · 1$/);
+  await page.locator('#result-filter').selectOption('price_condition');
   assert.equal(await page.locator('#price-rows tr[data-line]').count(), 1);
   assert.match(await page.locator('#price-rows').innerText(), /원가격이 9,900원 이하/);
   assert.equal(posts, 0);
@@ -278,7 +283,7 @@ test('restoration shows the original price and sends the exact selected schedule
   });
   await page.waitForFunction(() => !document.querySelector('#check-prices').disabled);
   await page.locator('input[name="mode"][value="restore"]').check();
-  assert.equal(await page.locator('#restore-help').isVisible(), true);
+  assert.equal(await page.getByRole('group', {name: '적용 시작 (한국 시간)'}).isVisible(), true);
   assert.match(await page.locator('#price-rows .target-price').innerText(), /49,800원/);
   assert.equal(requests.length, 0);
   await page.getByRole('button', {name: '현재가 조회', exact: true}).click();
@@ -302,19 +307,18 @@ test('candidate-name searches combine with groups and survive a state refresh', 
     await respond(route, state);
   });
   await page.waitForFunction(() => !document.querySelector('#check-prices').disabled);
-  await page.locator('[data-result-group="price_condition"][type="button"]').click();
+  await page.locator('#result-filter').selectOption('price_condition');
   await page.locator('#code-filter').fill('베이지 후보');
   assert.equal(await page.locator('#price-rows tr[data-line]').count(), 1);
   assert.match(await page.locator('#price-rows').innerText(), /블랙 후보 니트/);
   assert.match(await page.locator('#price-rows').innerText(), /베이지 후보 니트/);
-  assert.equal(await page.locator('[data-result-group=""][type="button"] .result-group-count').innerText(), '1');
-  assert.equal(await page.locator('[data-result-group="ready"][type="button"] .result-group-count').innerText(), '0');
+  assert.equal(await page.locator('#work-count').innerText(), '1 / 14건 · 저장 확인 1건');
+  assert.match(await page.locator('#result-filter option[value="ready"]').innerText(), / · 0$/);
   state.message = '조회 결과 갱신 완료';
   await page.waitForFunction(() => document.querySelector('#status-message').textContent === '조회 결과 갱신 완료');
   assert.equal(await page.locator('#code-filter').inputValue(), '베이지 후보');
   assert.equal(await page.locator('#result-filter').inputValue(), 'price_condition');
-  assert.equal(await page.locator('[data-result-group="price_condition"][type="button"]').getAttribute('aria-pressed'), 'true');
-  await page.locator('[data-result-group="additional"][type="button"]').click();
+  await page.locator('#result-filter').selectOption('additional');
   assert.equal(await page.locator('#price-rows tr[data-line]').count(), 0);
   assert.equal(await page.locator('#no-filter-results').isVisible(), true);
   await page.locator('#code-filter').fill('이름으로 찾을');
@@ -364,8 +368,10 @@ test('saved uploads remain visible with date, filename and count and support rea
   });
   await page.waitForFunction(() => !document.querySelector('#check-prices').disabled);
   assert.equal(await page.locator('#import-details').getAttribute('open'), null);
+  assert.equal(await page.locator('#history-tools').isVisible(), false);
+  await page.locator('#import-heading').click();
   assert.equal(await page.locator('#history-tools').isVisible(), true);
-  assert.equal(await page.locator('#history-count').innerText(), '2개 보관');
+  assert.equal(await page.locator('#history-select option').count(), 3);
   assert.equal(await page.locator('#history-select').inputValue(), currentId);
   const currentLabel = await page.locator('#history-select option[value="' + currentId + '"]').innerText();
   assert.match(currentLabel, /26\. 11\. 11\./);
@@ -390,7 +396,7 @@ test('saved uploads remain visible with date, filename and count and support rea
   await page.waitForFunction(() => document.querySelector('#status-message').textContent === '이전 가격 목록 3건 불러오기 완료');
   assert.deepEqual(mutations, [{endpoint: '/api/history/load', payload: {id: previousId}}]);
   assert.equal(await page.locator('#history-select').inputValue(), previousId);
-  assert.match(await page.locator('#history-select option:checked').innerText(), /earlier\.xlsx.*3건.*현재 사용 중/);
+  assert.match(await page.locator('#history-select option:checked').textContent(), /earlier\.xlsx.*3건.*현재 사용 중/);
   assert.match(await page.locator('#plan-summary').innerText(), /earlier\.xlsx.*26\. 11\. 10\./);
   assert.equal(await page.locator('#source-text').inputValue(), previousPlan.sourceText);
   assert.equal(await page.locator('#price-rows tr[data-line]').count(), 3);
