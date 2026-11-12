@@ -19,6 +19,7 @@ const controls = {
   modes: [...document.querySelectorAll('input[name="mode"]')],
   search: byId("code-filter"),
   filter: byId("result-filter"),
+  groups: byId("result-groups"),
   rows: byId("price-rows"),
   priceDialog: byId("price-edit-dialog"),
   priceForm: byId("price-edit-form"),
@@ -28,8 +29,6 @@ const controls = {
   priceMessage: byId("price-edit-message"),
 };
 
-const filterOptions = [...controls.filter.options].filter(option => option.value)
-  .map(option => ({option, label: option.textContent}));
 const moneyFormat = new Intl.NumberFormat("ko-KR");
 const dateTimeFormat = new Intl.DateTimeFormat("ko-KR", {
   timeZone: "Asia/Seoul",
@@ -272,9 +271,11 @@ function renderRows() {
     const group = resultGroups.find(item => item.statuses.includes(status)) ?? resultGroups.at(-1);
     return {row, result, group};
   }).filter(({row, result}) => rowMatches(row, result, query, ""));
-  for (const {option, label} of filterOptions) {
-    const count = matchingSearch.filter(({row, result}) => rowMatches(row, result, "", option.value)).length;
-    option.textContent = label + " · " + moneyFormat.format(count);
+  for (const button of controls.groups.querySelectorAll("button[data-result-group]")) {
+    const value = button.dataset.resultGroup;
+    const count = value ? matchingSearch.filter(item => item.group.value === value).length : matchingSearch.length;
+    button.querySelector(".result-group-count").textContent = moneyFormat.format(count);
+    button.setAttribute("aria-pressed", String(filter === value));
   }
   const filtered = matchingSearch.filter(({row, result}) => rowMatches(row, result, "", filter));
   const showGroupHeadings = !filter && new Set(filtered.map(({group}) => group)).size > 1;
@@ -730,6 +731,14 @@ for (const filter of [controls.search, controls.filter]) {
   });
 }
 
+controls.groups.addEventListener("click", event => {
+  const button = event.target.closest("button[data-result-group]");
+  if (!button) return;
+  controls.filter.value = button.dataset.resultGroup;
+  renderRows();
+  refreshControls();
+});
+
 controls.rows.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-line]");
   if (!button || button.disabled) return;
@@ -743,6 +752,14 @@ controls.hour.append(new Option("시각 선택", ""));
 for (let hour = 0; hour < 24; hour++) {
   const value = String(hour).padStart(2, "0");
   controls.hour.append(new Option(value + "시", value));
+}
+
+for (const group of [{value: "", label: "전체"}, ...resultGroups]) {
+  const button = element("button", undefined, "button button-outline result-group-button");
+  button.type = "button";
+  button.dataset.resultGroup = group.value;
+  button.append(element("span", group.label), element("span", "0", "result-group-count"));
+  controls.groups.append(button);
 }
 
 render();

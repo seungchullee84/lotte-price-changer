@@ -235,16 +235,17 @@ test('all results are grouped once with effective restrictions and filters never
     await respond(route, state);
   });
   await page.waitForFunction(() => !document.querySelector('#check-prices').disabled);
-  const counts = await page.locator('#result-filter > option[value]:not([value=""])').evaluateAll(options => Object.fromEntries(
-    options.map(option => [option.value, Number(option.textContent.split(' · ').at(-1))]),
+  const counts = await page.locator('#result-groups button').evaluateAll(buttons => Object.fromEntries(
+    buttons.map(button => [button.dataset.resultGroup, Number(button.querySelector('.result-group-count').textContent)]),
   ));
-  assert.deepEqual(counts, {ready: 1, missing: 1, price_condition: 3, completed: 4, additional: 5});
+  assert.deepEqual(counts, {'': 14, ready: 1, missing: 1, price_condition: 3, completed: 4, additional: 5});
+  assert.equal(await page.locator('#result-groups [data-result-group=""]').getAttribute('aria-pressed'), 'true');
   assert.match(await page.locator('#work-count').innerText(), /총 14건/);
   assert.deepEqual(await page.locator('#price-rows tr[data-line]').evaluateAll(rows => rows.map(row => Number(row.dataset.line))),
     [1, 2, 3, 4, 14, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   assert.deepEqual(await page.locator('#price-rows .result-group-row').evaluateAll(rows => rows.map(row => row.dataset.resultGroup)),
     ['ready', 'missing', 'price_condition', 'completed', 'additional']);
-  await page.locator('#result-filter').selectOption('price_condition');
+  await page.locator('#result-groups [data-result-group="price_condition"]').click();
   assert.equal(await page.locator('#result-filter').inputValue(), 'price_condition');
   assert.deepEqual(await page.locator('#price-rows tr[data-line]').evaluateAll(rows => rows.map(row => row.dataset.line)), ['3', '4', '14']);
   const mismatch = page.locator('#price-rows tr[data-line="3"]');
@@ -258,8 +259,8 @@ test('all results are grouped once with effective restrictions and filters never
   await page.locator('#result-filter').selectOption('pending_change');
   assert.deepEqual(await page.locator('#price-rows tr[data-line]').evaluateAll(rows => rows.map(row => Number(row.dataset.line))), [6, 7]);
   await page.locator('input[name="mode"][value="restore"]').check();
-  assert.match(await page.locator('#result-filter option[value="price_condition"]').innerText(), / · 1$/);
-  await page.locator('#result-filter').selectOption('price_condition');
+  assert.equal(await page.locator('#result-groups [data-result-group="price_condition"] .result-group-count').innerText(), '1');
+  await page.locator('#result-groups [data-result-group="price_condition"]').click();
   assert.equal(await page.locator('#price-rows tr[data-line]').count(), 1);
   assert.match(await page.locator('#price-rows').innerText(), /원가격이 9,900원 이하/);
   assert.equal(posts, 0);
@@ -313,12 +314,14 @@ test('candidate-name searches combine with groups and survive a state refresh', 
   assert.match(await page.locator('#price-rows').innerText(), /블랙 후보 니트/);
   assert.match(await page.locator('#price-rows').innerText(), /베이지 후보 니트/);
   assert.equal(await page.locator('#work-count').innerText(), '1 / 14건 · 저장 확인 1건');
-  assert.match(await page.locator('#result-filter option[value="ready"]').innerText(), / · 0$/);
+  assert.equal(await page.locator('#result-groups [data-result-group=""] .result-group-count').innerText(), '1');
+  assert.equal(await page.locator('#result-groups [data-result-group="ready"] .result-group-count').innerText(), '0');
+  assert.equal(await page.locator('#result-groups [data-result-group="price_condition"]').getAttribute('aria-pressed'), 'true');
   state.message = '조회 결과 갱신 완료';
   await page.waitForFunction(() => document.querySelector('#status-message').textContent === '조회 결과 갱신 완료');
   assert.equal(await page.locator('#code-filter').inputValue(), '베이지 후보');
   assert.equal(await page.locator('#result-filter').inputValue(), 'price_condition');
-  await page.locator('#result-filter').selectOption('additional');
+  await page.locator('#result-groups [data-result-group="additional"]').click();
   assert.equal(await page.locator('#price-rows tr[data-line]').count(), 0);
   assert.equal(await page.locator('#no-filter-results').isVisible(), true);
   await page.locator('#code-filter').fill('이름으로 찾을');

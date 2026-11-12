@@ -220,13 +220,34 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .notice-error { border-color: #bb625b; background: #fff2f0; color: #8b2d25; }
 .notice-warning { border-color: #b8883f; background: #fff8ed; color: #76490f; }
 
+.result-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px var(--inset) 0;
+  border-top: 1px solid var(--line);
+}
+.result-group-button {
+  gap: 7px;
+  min-height: 34px;
+  padding: 5px 9px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.button.result-group-button[aria-pressed="true"] {
+  border-color: #7e9cbd;
+  background: #edf4fc;
+  color: var(--accent);
+  font-weight: 700;
+}
+.result-group-count { font-variant-numeric: tabular-nums; font-weight: 750; }
 .list-tools {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 8px var(--inset);
-  border-top: 1px solid var(--line);
 }
 #code-filter { width: min(235px, 100%); }
 #result-filter { max-width: 100%; }
