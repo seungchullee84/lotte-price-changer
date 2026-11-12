@@ -476,18 +476,19 @@ async function clickPortalMenu(page, menu) {
 }
 
 const commonItemSuffix = '_form_div_Work_div_Search_div_itmno';
+const commonItemCode = /^\d{1,12}$/;
 
 async function readCommonItem(profileDirectory) {
   const file = path.join(path.dirname(profileDirectory), 'portal-common-item.json');
   try {
     const item = JSON.parse(await readFile(file, 'utf8'));
-    if (typeof item?.code !== 'string' || !/^\d{1,12}$/.test(item.code) ||
+    if (typeof item?.code !== 'string' || !commonItemCode.test(item.code) ||
         typeof item.name !== 'string' || !item.name.trim()) {
       throw screenError('가격변경기의 공통품번 설정을 확인해 주세요.');
     }
     return { code: item.code, name: item.name.trim() };
   } catch (error) {
-    if (error.code === 'ENOENT') return null;
+    if (error.code === 'ENOENT') return { name: '지오다노' };
     throw screenError('가격변경기의 공통품번 설정을 확인해 주세요.');
   }
 }
@@ -495,11 +496,14 @@ async function readCommonItem(profileDirectory) {
 async function selectCommonItem(page, item, hasBlockingDraft) {
   const code = control(page, commonItemSuffix + '_edt_Code_input');
   const name = control(page, commonItemSuffix + '_edt_Name_input');
-  const isSelected = async () => (await code.inputValue()).trim() === item.code &&
-    (await name.inputValue()).trim() === item.name;
+  const isSelected = async expectedCode => {
+    const selectedCode = (await code.inputValue()).trim();
+    return commonItemCode.test(selectedCode) && (!expectedCode || selectedCode === expectedCode) &&
+      (await name.inputValue()).trim() === item.name;
+  };
   const popup = suffix => page.locator(priceFrame + '[id$="_commPopup_form_' + suffix + '"]').filter({ visible: true });
   const search = popup('btn_Search');
-  if (!await search.isVisible() && await isSelected()) return;
+  if (!await search.isVisible() && await isSelected(item.code)) return;
   if ((await readDraftGrids(page)).flat().some(hasBlockingDraft)) {
     throw screenError('입력된 가격을 먼저 확인한 뒤 공통품번을 선택해 주세요.');
   }
@@ -526,13 +530,14 @@ async function selectCommonItem(page, item, hasBlockingDraft) {
   }
   const cellId = await nameCell.getAttribute('id', { timeout: 9000 });
   const codeCell = page.locator('[id=' + JSON.stringify(cellId.replace(/_1$/, '_0')) + ']');
-  if ((await codeCell.innerText()).trim() !== item.code) {
+  const foundCode = (await codeCell.innerText()).trim();
+  if (!commonItemCode.test(foundCode) || (item.code && foundCode !== item.code)) {
     throw screenError('조회 결과에서 설정한 공통품번을 확인하지 못했습니다.');
   }
   await nameCell.click();
   await popup('btn_Confirm').click();
   await search.waitFor({ state: 'hidden' });
-  if (!await isSelected()) throw screenError('가격관리 화면에 공통품번이 적용됐는지 확인해 주세요.');
+  if (!await isSelected(foundCode)) throw screenError('가격관리 화면에 공통품번이 적용됐는지 확인해 주세요.');
 }
 
 export function openPortal(profileDirectory) {
@@ -779,7 +784,6 @@ export function openPortal(profileDirectory) {
         throw screenError('포털 가격관리 표가 열렸는지 확인해 주세요.');
       });
       const commonItem = await readCommonItem(profileDirectory);
-      if (!commonItem) return { status: 'ready' };
       try {
         await selectCommonItem(page, commonItem, hasBlockingDraft);
       } catch (error) {

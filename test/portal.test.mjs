@@ -32,7 +32,7 @@ function snapshotOf(row) {
     headers: { 1: '상품코드', 2: '판매가', 3: '스타일' } };
 }
 
-test('opening the official portal uses the linked login, closes notices and opens price management', async t => {
+test('opening the official portal selects Giordano by default and honors a local common-item setting', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'price-portal-login-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const registrar = path.join(root, 'registrar fixture');
@@ -73,8 +73,10 @@ test('opening the official portal uses the linked login, closes notices and open
       <input id="${frame}_commPopup_form_div_Search_edt_itmno_input">
       <button id="${frame}_commPopup_form_btn_Search">조회</button>
       <div id="common-item-result" hidden>
-        <span id="${frame}_commPopup_form_div_Data_grd_List_body_gridrow_0_cell_0_0">123456</span>
-        <button id="${frame}_commPopup_form_div_Data_grd_List_body_gridrow_0_cell_0_1">기준상품</button>
+        <span id="${frame}_commPopup_form_div_Data_grd_List_body_gridrow_0_cell_0_0">654321</span>
+        <button id="${frame}_commPopup_form_div_Data_grd_List_body_gridrow_0_cell_0_1">지오다노</button>
+        <span id="${frame}_commPopup_form_div_Data_grd_List_body_gridrow_1_cell_1_0">123456</span>
+        <button id="${frame}_commPopup_form_div_Data_grd_List_body_gridrow_1_cell_1_1">지오다노 키즈</button>
       </div>
       <button id="${frame}_commPopup_form_btn_Confirm" disabled>확인</button>
     </section>
@@ -102,12 +104,21 @@ test('opening the official portal uses the linked login, closes notices and open
       click('${frame}_form_div_Work_div_Search_div_itmno_btn_CommPopup',
         () => document.getElementById('common-item-popup').hidden = false);
       click('${frame}_commPopup_form_btn_Search', () => document.getElementById('common-item-result').hidden = false);
-      click('${frame}_commPopup_form_div_Data_grd_List_body_gridrow_0_cell_0_1',
-        () => document.getElementById('${frame}_commPopup_form_btn_Confirm').disabled = false);
-      click('${frame}_commPopup_form_btn_Confirm', () => {
-        document.getElementById('${frame}_form_div_Work_div_Search_div_itmno_edt_Code_input').value = '123456';
-        document.getElementById('${frame}_form_div_Work_div_Search_div_itmno_edt_Name_input').value = '기준상품';
+      const confirm = document.getElementById('${frame}_commPopup_form_btn_Confirm');
+      let selection;
+      for (const row of [0, 1]) {
+        const prefix = '${frame}_commPopup_form_div_Data_grd_List_body_gridrow_' + row + '_cell_' + row + '_';
+        click(prefix + '1', () => {
+          selection = [0, 1].map(column => document.getElementById(prefix + column).textContent);
+          confirm.disabled = false;
+        });
+      }
+      click(confirm.id, () => {
+        document.getElementById('${frame}_form_div_Work_div_Search_div_itmno_edt_Code_input').value = selection[0];
+        document.getElementById('${frame}_form_div_Work_div_Search_div_itmno_edt_Name_input').value = selection[1];
         document.getElementById('common-item-popup').hidden = true;
+        document.getElementById('common-item-result').hidden = true;
+        confirm.disabled = true;
       });
     </script>` }));
   await page.goto(portalUrl);
@@ -138,30 +149,35 @@ test('opening the official portal uses the linked login, closes notices and open
   assert.deepEqual(await portal.open(), { status: 'unconfigured' });
   assert.deepEqual(attempts, []);
   await writeFile(path.join(root, 'registrar-login-root.txt'), registrar);
-  assert.deepEqual(await portal.open(), { status: 'ready' });
+  assert.deepEqual(await portal.open(), { status: 'ready', commonItemName: '지오다노' });
   assert.deepEqual(attempts, [{ dataRoot: path.join(registrar, 'data'), waitForForm: true }]);
-  const actions = await page.evaluate(() => window.actions);
-  assert.deepEqual(actions, [
+  const selectionActions = row => [
+    frame + '_form_div_Work_div_Search_div_itmno_btn_CommPopup',
+    frame + '_commPopup_form_btn_Search',
+    frame + '_commPopup_form_div_Data_grd_List_body_gridrow_' + row + '_cell_' + row + '_1',
+    frame + '_commPopup_form_btn_Confirm',
+  ];
+  const actions = [
     'portal_loginOpenPopup_2_titlebar_closebutton',
     'portal_loginOpenPopup_1_titlebar_closebutton',
     'portal_form_men_TopMenu_6001268',
     'undefined_pdv_LeftMenu_div_LeftMenu_btn_Left6001278',
     'prices',
-  ]);
+    ...selectionActions(0),
+  ];
+  assert.deepEqual(await page.evaluate(() => window.actions), actions);
   assert.equal(await page.locator('#price-screen').isVisible(), true);
+  assert.equal(await page.locator('[id$="_div_itmno_edt_Code_input"]').inputValue(), '654321');
   await assert.rejects(portal.ensureSearch(), /상품코드구분을 -전체-/);
 
-  await writeFile(path.join(root, 'portal-common-item.json'), JSON.stringify({ code: '123456', name: '기준상품' }));
-  assert.deepEqual(await portal.open(), { status: 'ready', commonItemName: '기준상품' });
-  const actionsWithItem = [...actions,
-    frame + '_form_div_Work_div_Search_div_itmno_btn_CommPopup',
-    frame + '_commPopup_form_btn_Search',
-    frame + '_commPopup_form_div_Data_grd_List_body_gridrow_0_cell_0_1',
-    frame + '_commPopup_form_btn_Confirm',
-  ];
+  const settings = path.join(root, 'portal-common-item.json');
+  await assert.rejects(readFile(settings), { code: 'ENOENT' });
+  await writeFile(settings, JSON.stringify({ code: '123456', name: '지오다노 키즈' }));
+  assert.deepEqual(await portal.open(), { status: 'ready', commonItemName: '지오다노 키즈' });
+  const actionsWithItem = [...actions, ...selectionActions(1)];
   assert.deepEqual(await page.evaluate(() => window.actions), actionsWithItem);
   assert.equal(await page.locator('#common-item-popup').isVisible(), false);
-  assert.deepEqual(await portal.open(), { status: 'ready', commonItemName: '기준상품' });
+  assert.deepEqual(await portal.open(), { status: 'ready', commonItemName: '지오다노 키즈' });
   assert.deepEqual(await page.evaluate(() => window.actions), actionsWithItem);
   assert.equal(launched, 1);
   await writeFile(path.join(root, 'registrar-login-root.txt'), 'relative-path');
