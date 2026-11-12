@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { EventEmitter } from 'node:events';
 
 const portalFile = new URL('../portal.mjs', import.meta.url);
@@ -28,6 +30,43 @@ function snapshotOf(row) {
   return { cells: { '0:0': { prefix: '', values, selected: row.selected } },
     headers: { 1: '상품코드', 2: '판매가', 3: '스타일' } };
 }
+
+test('opening the official portal uses the linked registrar settings in the existing browser', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'price-portal-login-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const registrar = path.join(root, 'registrar fixture');
+  const profile = path.join(root, 'chrome-profile');
+  await mkdir(registrar);
+  await writeFile(path.join(registrar, 'browser-login-store.mjs'),
+    'export function createBrowserLoginStore(dataRoot) { return { dataRoot }; }');
+  await writeFile(path.join(registrar, 'browser-login.mjs'),
+    'export function tryLotteLogin(page, options) { return page.recordLogin(options); }');
+  const attempts = [];
+  let launched = 0;
+  const page = {
+    url: () => 'https://together.lotteshopping.com/EMDV3/index.html',
+    isClosed: () => false, setDefaultTimeout() {}, async bringToFront() {},
+    recordLogin({ store, waitForForm }) {
+      attempts.push({ dataRoot: store.dataRoot, waitForForm });
+      return { status: 'authenticated' };
+    },
+  };
+  setTestChromium({ async launchPersistentContext(directory) {
+    assert.equal(directory, profile);
+    launched += 1;
+    return { pages: () => [page], on() {} };
+  } });
+  const portal = openPortal(profile);
+  assert.deepEqual(await portal.open(), { status: 'unconfigured' });
+  assert.deepEqual(attempts, []);
+  await writeFile(path.join(root, 'registrar-login-root.txt'), registrar);
+  assert.deepEqual(await portal.open(), { status: 'authenticated' });
+  assert.deepEqual(attempts, [{ dataRoot: path.join(registrar, 'data'), waitForForm: true }]);
+  assert.equal(launched, 1);
+  await writeFile(path.join(root, 'registrar-login-root.txt'), 'relative-path');
+  assert.deepEqual(await portal.open(), { status: 'unavailable' });
+  assert.equal(attempts.length, 1);
+});
 
 test('saved or already-current values do not masquerade as unsaved drafts', () => {
   assert.equal(hasUnsubmittedDraft({ ...offer, currentPrice: 15000 }), false);

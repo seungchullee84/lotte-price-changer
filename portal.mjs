@@ -1,3 +1,6 @@
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { matchIdentity, plannedChange } from './ledger.mjs';
 
 export const PORTAL_URL = 'https://together.lotteshopping.com/EMDV3/index.html';
@@ -411,6 +414,26 @@ async function waitForQueryResult(page, watcher, code) {
   }
 }
 
+async function loginWithRegistrar(page, profileDirectory) {
+  if (!page.url().startsWith(portalOrigin + '/EMDV3/')) return { status: 'manual' };
+  const link = path.join(path.dirname(profileDirectory), 'registrar-login-root.txt');
+  try {
+    const root = await readFile(link, 'utf8').then(value => value.trim()).catch(error => {
+      if (error.code === 'ENOENT') return '';
+      throw error;
+    });
+    if (!root) return { status: 'unconfigured' };
+    if (!path.isAbsolute(root)) return { status: 'unavailable' };
+    const [{ tryLotteLogin }, { createBrowserLoginStore }] = await Promise.all([
+      import(pathToFileURL(path.join(root, 'browser-login.mjs')).href),
+      import(pathToFileURL(path.join(root, 'browser-login-store.mjs')).href),
+    ]);
+    return await tryLotteLogin(page, { store: createBrowserLoginStore(path.join(root, 'data')), waitForForm: true });
+  } catch {
+    return { status: 'unavailable' };
+  }
+}
+
 export function openPortal(profileDirectory) {
   let context;
   let page;
@@ -620,9 +643,9 @@ export function openPortal(profileDirectory) {
 
   return {
     async open() {
-      if (page && !page.isClosed()) {
+      if (page && !page.isClosed() && page.url().startsWith(portalOrigin + '/')) {
         await page.bringToFront();
-        return;
+        return loginWithRegistrar(page, profileDirectory);
       }
       if (!context) {
         const { chromium } = await import('playwright');
@@ -642,6 +665,7 @@ export function openPortal(profileDirectory) {
       page.setDefaultTimeout(5000);
       if (page.url() === 'about:blank') await page.goto(PORTAL_URL, { waitUntil: 'domcontentloaded' });
       await page.bringToFront();
+      return loginWithRegistrar(page, profileDirectory);
     },
     async ensureSearch() { await ensureSearchScreen(activePage()); },
     async inspect() { return readGrid(activePage()); },

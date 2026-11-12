@@ -14,7 +14,7 @@ import { appendFile } from 'node:fs/promises';
 import path from 'node:path';
 export function openPortal() {
   return {
-    async open() {}, async close() {}, async ensureSearch() {},
+    async open() { return {status:'authenticated'}; }, async close() {}, async ensureSearch() {},
     async query(code) {
       await new Promise(resolve => setTimeout(resolve, 40));
       return [{code, id:code, currentPrice:code==='000002'?15000:20000,
@@ -79,6 +79,9 @@ test('server skips applied/pending rows, persists outcomes and reuses authentica
       'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
   }
   assert.equal((await fetch(base+'/api/state')).status,403);
+  const portalOpen = await request('/api/portal/open', {});
+  assert.equal(portalOpen.status, 200);
+  assert.match((await portalOpen.json()).message, /자동 로그인 완료/);
   assert.equal((await request('/api/import', {sourceText:[1,2,3,4,5].map(n=>
     '01'+String(n).padStart(6,'0')+'\t20000\t15000').join('\n')})).status,200);
   const future = new Date(Date.now()+9*3600000+24*3600000).toISOString();
