@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseMemo } from './memo.mjs';
-import { openPlan, reconcileRow, recordPriceChange } from './ledger.mjs';
+import { matchIdentity, openPlan, reconcileRow, recordPriceChange } from './ledger.mjs';
 import { openPortal } from './portal.mjs';
 
 const appDir = fileURLToPath(new URL('.', import.meta.url));
@@ -156,6 +156,17 @@ let results = {};
 let busy = false;
 const runStateFile = path.join(dataDir, 'run-state.json');
 let pendingStateWrite = Promise.resolve();
+
+function isStagedInput(result) {
+  return result?.status === 'pending' && result.offer && !result.needsReview;
+}
+
+function assertPortalInputResolved() {
+  if (Object.values(results).some(result => isStagedInput(result) || result?.needsReview)) {
+    throw Object.assign(new Error('이전 포털 입력의 상태를 확인한 뒤 진행해 주세요.'), { status: 409 });
+  }
+}
+
 function persistRunState() {
   const rowRevisions = Object.fromEntries((plan?.rows ?? []).map(row => [row.line, row.priceRevision ?? '']));
   const contents = JSON.stringify({ planId: plan && planId(plan), mode, results, rowRevisions });
@@ -183,7 +194,7 @@ try {
         continue;
       }
       if (stale) continue;
-      if (result?.status === 'saved') results[row.line] = result;
+      if (result?.status === 'saved' || isStagedInput(result)) results[row.line] = result;
       else if (result?.needsReview) results[row.line] = {
         ...result, status: 'interrupted', message: '이전 작업이 중단되었습니다. 현재가 조회로 포털 저장 결과를 확인하세요.',
       };
@@ -318,6 +329,33 @@ async function checkPrices(onCheckedGroup) {
   return true;
 }
 
+async function checkStagedInputs(rows) {
+  const previous = results;
+  const updated = { ...previous };
+  for (const row of rows) {
+    const pending = previous[row.line];
+    message = row.code + ' · 포털 입력 상태 확인 중';
+    const offers = await portal.query(row.code);
+    const matches = offers.filter(offer => matchIdentity(offer, pending.offer));
+    if (!matches.length && offers.length) {
+      updated[row.line] = {
+        status: 'mismatch', expectedPrice: pending.expectedPrice, targetPrice: pending.targetPrice, offers,
+        message: '포털에서 이전에 입력한 상품을 찾지 못했습니다.',
+      };
+    } else {
+      updated[row.line] = reconcileRow(row, matches, mode, priceChanges);
+    }
+  }
+  results = updated;
+  try {
+    await persistRunState();
+  } catch (error) {
+    results = previous;
+    throw error;
+  }
+  message = '입력 상태 확인 완료 · 다음 상품을 진행할 수 있습니다.';
+}
+
 async function stageRow(row, result, date, hour, { save = false, reuseSearch = false } = {}) {
   const reason = restriction(row, mode);
   if (reason) throw Object.assign(new Error(reason), { saveAttempted: false });
@@ -356,16 +394,13 @@ async function stageRow(row, result, date, hour, { save = false, reuseSearch = f
     }
   } else {
     result.status = 'pending';
-    result.message = '일괄 적용 완료 · 포털에서 확인 후 저장';
-    message = row.code + ' · ' + money.format(result.targetPrice) + '원 · 포털에서 적용 내역을 확인하세요.';
+    result.message = '포털에 입력 완료 · 저장 후 입력 상태 확인';
+    message = row.code + ' · ' + money.format(result.targetPrice) + '원 · 포털 입력 완료';
   }
   return true;
 }
 
 async function runBatch(operation, date, hour, { immediate = false } = {}) {
-  if (Object.values(results).some(result => result.needsReview)) {
-    throw new Error('포털에서 중단된 상품의 저장 결과를 확인한 뒤 현재가를 다시 조회해 주세요.');
-  }
   if (!immediate && (mode !== operation || plan.rows.some(row => !results[row.line]))) {
     mode = operation;
     results = {};
@@ -603,7 +638,12 @@ const server = createServer(async (req, res) => {
     } else if (url.pathname === '/api/portal/check') {
       if (!plan?.rows.length) throw new Error('먼저 목록을 저장해 주세요.');
       const operation = validMode(body.mode);
+      const staged = plan.rows.filter(row => isStagedInput(results[row.line]));
       busy = true;
+      if (staged.length) {
+        try { await checkStagedInputs(staged); } finally { busy = false; }
+        return json(res, 200, publicState());
+      }
       try { await portal.ensureSearch(); } catch (error) { busy = false; throw error; }
       mode = operation;
       results = {};
@@ -614,6 +654,7 @@ const server = createServer(async (req, res) => {
         });
     } else if (url.pathname === '/api/portal/run' || url.pathname === '/api/portal/check-and-run') {
       if (!plan?.rows.length) throw new Error('먼저 가격 목록을 저장해 주세요.');
+      assertPortalInputResolved();
       const operation = validMode(body.mode);
       validateSchedule(body.date, body.hour);
       busy = true;
@@ -625,12 +666,19 @@ const server = createServer(async (req, res) => {
           busy = false;
         });
     } else if (url.pathname === '/api/portal/stage') {
+      assertPortalInputResolved();
       const operation = validMode(body.mode);
       const row = plan?.rows.find(item => item.line === body.line);
       const result = results[body.line];
       if (!row || operation !== mode || result?.status !== 'ready') throw new Error('현재가를 다시 조회해 주세요.');
       busy = true;
-      try { await stageRow(row, result, body.date, body.hour); } finally { busy = false; }
+      try {
+        await stageRow(row, result, body.date, body.hour);
+        try { await persistRunState(); } catch (error) {
+          message += ' 가격변경기의 작업 기록을 저장하지 못했습니다.';
+          await logError('persist-stage', error);
+        }
+      } finally { busy = false; }
     } else {
       return json(res, 404, { error: '요청한 작업을 찾을 수 없습니다.' });
     }

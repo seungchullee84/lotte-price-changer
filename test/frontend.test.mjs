@@ -552,6 +552,45 @@ test('a lost price-save response is reconciled without retry or portal execution
   assert.deepEqual(mutations, ['/api/plan/price']);
 });
 
+test('staged restores show the scoped check and keep the schedule when the next input becomes available', async t => {
+  const state = fixtureState();
+  state.mode = 'restore';
+  state.plan.rows.push({line: 2, originalCode: '01001235', code: '001235', currentPrice: 49800, newPrice: 44200});
+  state.results = {
+    1: {status: 'pending', offer: {id: '1', currentPrice: 44200}},
+    2: {status: 'ready', offer: {id: '2', currentPrice: 44200}},
+  };
+  const posts = [];
+  const page = await openFixture(t, async route => {
+    if (route.request().method() === 'POST') {
+      const endpoint = new URL(route.request().url()).pathname;
+      posts.push([endpoint, route.request().postDataJSON()]);
+      if (endpoint === '/api/portal/check') state.results[1].status = 'scheduled';
+      if (endpoint === '/api/portal/stage') state.results[2].status = 'pending';
+    }
+    await respond(route, state);
+  });
+  const check = page.getByRole('button', {name: '입력 상태 확인'});
+  const next = page.locator('[data-action="stage"][data-line="2"]');
+  const date = page.locator('#schedule-date');
+  const hour = page.locator('#schedule-hour');
+  await check.waitFor();
+  await date.fill('2099-02-03');
+  await hour.selectOption('17');
+  await page.locator('#result-filter').selectOption('ready');
+  assert.equal(await next.isDisabled(), true);
+  await check.click();
+  await page.waitForFunction(() => !document.querySelector('[data-action="stage"]')?.disabled);
+  assert.equal(await page.locator('#check-prices').innerText(), '현재가 조회');
+  assert.equal(await page.locator('#result-filter').inputValue(), 'ready');
+  await next.click();
+  await check.waitFor();
+  assert.deepEqual(posts, [
+    ['/api/portal/check', {mode: 'restore'}],
+    ['/api/portal/stage', {line: 2, mode: 'restore', date: '2099-02-03', hour: '17'}],
+  ]);
+});
+
 test('unsaved portal input or uncertain saves block price edits and execution until read-only lookup resolves them', async t => {
   const state = fixtureState();
   state.plan.rows.push({line: 2, originalCode: '01001235', code: '001235', currentPrice: 49800, newPrice: 44200});

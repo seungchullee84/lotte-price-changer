@@ -1,4 +1,4 @@
-import { plannedChange } from './ledger.mjs';
+import { matchIdentity, plannedChange } from './ledger.mjs';
 
 export const PORTAL_URL = 'https://together.lotteshopping.com/EMDV3/index.html';
 const portalOrigin = new URL(PORTAL_URL).origin;
@@ -186,11 +186,6 @@ function hasUnsubmittedDraft(row) {
   if (progress?.status === 'pending_change' && row.portalSuccess === 'N' &&
       /이미.*판매가변경.*승인완료.*적용전/.test((row.portalResult ?? '').replace(/\s/g, ''))) return false;
   return !progress || progress.status === 'pending_change';
-}
-
-function matchIdentity(a, b) {
-  return a.code === b.code && a.id === b.id && a.style === b.style &&
-    a.channel === b.channel && a.store === b.store;
 }
 
 function checkDraft(grids, offer, targetPrice) {
@@ -479,7 +474,7 @@ export function openPortal(profileDirectory) {
     await acceptSaveNotice(portalPage, false);
     const nameInput = await ensureSearchScreen(portalPage);
     if ((await readDraftGrids(portalPage)).flat().some(hasBlockingDraft)) {
-      throw screenError('포털에 적용해 둔 가격이 있습니다. 저장하거나 취소한 뒤 다음 상품을 조회해 주세요.');
+      throw screenError('포털에 저장 대기 중인 가격이 있습니다. 포털에서 저장하거나 입력을 지운 뒤 다시 확인해 주세요.');
     }
     await nameInput.fill(code);
     await nameInput.press('Tab');

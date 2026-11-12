@@ -28,7 +28,7 @@ async function waitUntil(action) {
   throw new Error('Price edit test server did not become ready');
 }
 
-async function fixture(t, { results = initialResults(), rows, rowRevisions } = {}) {
+async function fixture(t, { results = initialResults(), rows, rowRevisions, mode = 'discount' } = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'price-edit-'));
   const data = path.join(directory, 'data');
   await mkdir(data);
@@ -36,13 +36,18 @@ async function fixture(t, { results = initialResults(), rows, rowRevisions } = {
     await copyFile(path.join(project, file), path.join(directory, file));
   }
   await writeFile(path.join(directory, 'portal.mjs'), `
-    import { appendFile } from 'node:fs/promises';
+    import { appendFile, readFile } from 'node:fs/promises';
     import path from 'node:path';
     export function openPortal() { return {
       async close() {}, async ensureSearch() {},
       async query(code) {
         await new Promise(resolve => setTimeout(resolve, 60));
-        return [{ id: String(Number(code)), code, currentPrice: 30000, channel: '롯데', store: '매장' }];
+        const data = process.env.PRICE_CHANGER_DATA;
+        await appendFile(path.join(data, 'fake-queries.txt'), code + '\\n');
+        const status = await readFile(path.join(data, 'fake-portal.json'), 'utf8')
+          .then(JSON.parse).catch(error => { if (error.code !== 'ENOENT') throw error; });
+        if (status?.draft) throw Object.assign(new Error('포털에 저장 대기 중인 가격이 있습니다.'), { code: 'PORTAL_SCREEN' });
+        return status?.offers?.[code] ?? [{ id: String(Number(code)), code, currentPrice: 30000, channel: '롯데', store: '매장' }];
       },
       async stage(offer, expected, target, date, hour, options) {
         await appendFile(path.join(process.env.PRICE_CHANGER_DATA, 'fake-stages.jsonl'),
@@ -54,7 +59,7 @@ async function fixture(t, { results = initialResults(), rows, rowRevisions } = {
   const plan = { sourceText, ...parsed, rows: rows ?? parsed.rows,
     importedAt: '2026-11-01T10:20:30.000Z', sourceName: '가격표.txt' };
   await writeFile(path.join(data, 'price-plan.json'), JSON.stringify(plan));
-  await writeFile(path.join(data, 'run-state.json'), JSON.stringify({ planId: sourceId, mode: 'discount', results, rowRevisions }));
+  await writeFile(path.join(data, 'run-state.json'), JSON.stringify({ planId: sourceId, mode, results, rowRevisions }));
   const reservation = createServer();
   reservation.listen(0, '127.0.0.1');
   await once(reservation, 'listening');
@@ -176,6 +181,55 @@ test('manual discount prices persist separately from uploaded originals and feed
   assert.deepEqual(competing.map(item => item.status).sort(), [200, 409]);
   const committed = await competing.find(item => item.status === 200).json();
   assert.equal((await app.state()).plan.rows[0].newPrice, committed.plan.rows[0].newPrice);
+});
+
+test('checking a staged restore resumes the next row and retains the rest of the lookup', async t => {
+  const results = initialResults();
+  for (const result of Object.values(results)) {
+    Object.assign(result, { status: 'ready', expectedPrice: 25000, targetPrice: 30000 });
+    result.offer.currentPrice = 25000;
+  }
+  const app = await fixture(t, { mode: 'restore', results });
+  const before = await app.state();
+  const future = new Date(Date.now() + 33 * 3600000).toISOString();
+  const schedule = { mode: 'restore', date: future.slice(0, 10), hour: future.slice(11, 13) };
+  const portalFile = path.join(app.data, 'fake-portal.json');
+  let response = await app.request('/api/portal/stage', { line: 1, ...schedule });
+  assert.equal(response.status, 200);
+  const staged = await response.json();
+  assert.equal(staged.results['1'].status, 'pending');
+  assert.deepEqual((await app.restart()).results, staged.results);
+  assert.equal((await app.request('/api/portal/stage', { line: 2, ...schedule })).status, 409);
+  for (const route of ['/api/portal/run', '/api/portal/check-and-run']) {
+    assert.equal((await app.request(route, schedule)).status, 409);
+  }
+
+  await writeFile(portalFile, JSON.stringify({ draft: true }));
+  response = await app.request('/api/portal/check', { mode: 'restore' });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /저장 대기 중인 가격/);
+  assert.deepEqual((await app.state()).results, staged.results);
+
+  const savedOffer = { ...results['1'].offer, scheduledPrice: '30,000', scheduledStatus: '진행 중' };
+  const anotherOffer = { ...results['1'].offer, id: 'other' };
+  await writeFile(portalFile, JSON.stringify({ offers: { '000001': [anotherOffer, savedOffer] } }));
+  response = await app.request('/api/portal/check', { mode: 'restore' });
+  assert.equal(response.status, 200);
+  const checked = await response.json();
+  assert.equal(checked.mode, 'restore');
+  assert.equal(checked.results['1'].status, 'scheduled');
+  assert.deepEqual(checked.results['1'].offer, savedOffer);
+  assert.deepEqual(checked.results['2'], before.results['2']);
+  assert.deepEqual((await app.restart()).results, checked.results);
+  const queries = await readFile(path.join(app.data, 'fake-queries.txt'), 'utf8');
+  assert.deepEqual(queries.trim().split('\n'), ['000001', '000001']);
+
+  response = await app.request('/api/portal/stage', { line: 2, ...schedule });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).results['2'].status, 'pending');
+  const stages = (await readFile(path.join(app.data, 'fake-stages.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.deepEqual(stages.map(item => [item.offer.code, item.target, item.save]),
+    [['000001', 30000, false], ['000002', 30000, false]]);
 });
 
 test('failed price snapshots preserve state and stale run results cannot return after a partial commit', async t => {

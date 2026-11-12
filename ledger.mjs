@@ -136,6 +136,11 @@ export function plannedChange(offer, targetPrice, { checkPendingFirst = false } 
   };
 }
 
+export function matchIdentity(a, b) {
+  return a.code === b.code && a.id === b.id && a.style === b.style &&
+    a.channel === b.channel && a.store === b.store;
+}
+
 function offerKey(code, id, channel, store) {
   return JSON.stringify([code, id, channel, store]);
 }

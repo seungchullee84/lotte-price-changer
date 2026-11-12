@@ -106,11 +106,17 @@ function hasUnresolvedInput() {
   return Object.values(state?.results ?? {}).some(result => result?.status === "pending" || result?.needsReview);
 }
 
+function hasStagedInput() {
+  return Object.values(state?.results ?? {}).some(result =>
+    result?.status === "pending" && result.offer && !result.needsReview);
+}
+
 function refreshControls() {
   const locked = isLocked();
   const edited = isDraftEdited();
   const editingPrice = Boolean(priceEdit);
   const unresolved = hasUnresolvedInput();
+  const staged = hasStagedInput();
   const haveRows = (state?.plan?.rows.length ?? 0) > 0;
   const restoring = mode === "restore";
   byId("restore-help").hidden = !restoring;
@@ -130,6 +136,7 @@ function refreshControls() {
   controls.downloadHistory.hidden = !downloadUrl;
   if (downloadUrl) controls.downloadHistory.href = downloadUrl;
   else controls.downloadHistory.removeAttribute("href");
+  controls.check.textContent = staged ? "입력 상태 확인" : "현재가 조회";
   controls.check.disabled = locked || edited || editingPrice || !haveRows;
   controls.run.disabled = controls.check.disabled || unresolved;
   controls.checkAndRun.disabled = controls.check.disabled || unresolved;
@@ -142,7 +149,7 @@ function refreshControls() {
   for (const button of controls.rows.querySelectorAll("button[data-line]")) {
     button.disabled = locked || edited || editingPrice || unresolved;
     if (button.dataset.action === "edit-price") {
-      button.title = unresolved ? "포털 입력 결과를 현재가 조회로 확인한 뒤 수정하세요." : "할인 판매가 수정";
+      button.title = unresolved ? controls.check.textContent + " 후 수정하세요." : "할인 판매가 수정";
     }
   }
   controls.priceInput.disabled = locked || Boolean(priceEdit?.conflict);
@@ -418,6 +425,9 @@ function renderNotice() {
   if (state?.plan?.rows.length && !state.busy && mode !== state.mode) {
     message = mode === "restore" ? "복구할 상품의 현재가를 조회하세요." : "할인 적용을 위해 현재가를 조회하세요.";
   }
+  if (!state?.busy && hasStagedInput()) {
+    message = [message, "포털에서 저장하거나 입력을 지운 뒤 입력 상태 확인을 눌러 주세요."].filter(Boolean).join(" ");
+  }
   if (!isLocked() && isDraftEdited()) message = "목록을 저장한 뒤 현재가를 조회하세요.";
   if (priceEdit) message = priceEdit.originalCode + " 할인 판매가를 편집 중입니다. 확인으로 저장하거나 취소하세요.";
   status.textContent = message;
@@ -654,7 +664,7 @@ controls.portal.addEventListener("click", () => {
 });
 controls.check.addEventListener("click", () => {
   if (controls.check.disabled) return;
-  controls.filter.value = "";
+  if (!hasStagedInput()) controls.filter.value = "";
   void send("/api/portal/check", {mode});
 });
 for (const [button, endpoint] of [
