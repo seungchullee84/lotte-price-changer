@@ -552,7 +552,7 @@ test('a lost price-save response is reconciled without retry or portal execution
   assert.deepEqual(mutations, ['/api/plan/price']);
 });
 
-test('staged restores show the scoped check and keep the schedule when the next input becomes available', async t => {
+test('the next restore checks the prior portal draft and stages the new row with the chosen schedule', async t => {
   const state = fixtureState();
   state.mode = 'restore';
   state.plan.rows.push({line: 2, originalCode: '01001235', code: '001235', currentPrice: 49800, newPrice: 44200});
@@ -561,12 +561,25 @@ test('staged restores show the scoped check and keep the schedule when the next 
     2: {status: 'ready', offer: {id: '2', currentPrice: 44200}},
   };
   const posts = [];
+  let unsaved = true;
   const page = await openFixture(t, async route => {
     if (route.request().method() === 'POST') {
       const endpoint = new URL(route.request().url()).pathname;
       posts.push([endpoint, route.request().postDataJSON()]);
-      if (endpoint === '/api/portal/check') state.results[1].status = 'scheduled';
-      if (endpoint === '/api/portal/stage') state.results[2].status = 'pending';
+      if (endpoint === '/api/portal/check') {
+        if (unsaved) {
+          return route.fulfill({
+            status: 400, contentType: 'application/json',
+            body: JSON.stringify({error: '포털에 저장 대기 중인 가격이 있습니다.'}),
+          });
+        }
+        state.results[1].status = 'scheduled';
+      } else {
+        assert.equal(endpoint, '/api/portal/stage');
+        assert.equal(state.results[1].status, 'scheduled');
+        state.results[2].status = 'pending';
+        state.message = '001235 · 포털 입력 완료';
+      }
     }
     await respond(route, state);
   });
@@ -578,14 +591,19 @@ test('staged restores show the scoped check and keep the schedule when the next 
   await date.fill('2099-02-03');
   await hour.selectOption('17');
   await page.locator('#result-filter').selectOption('ready');
-  assert.equal(await next.isDisabled(), true);
-  await check.click();
-  await page.waitForFunction(() => !document.querySelector('[data-action="stage"]')?.disabled);
-  assert.equal(await page.locator('#check-prices').innerText(), '현재가 조회');
-  assert.equal(await page.locator('#result-filter').inputValue(), 'ready');
+  assert.equal(await next.isEnabled(), true);
+  assert.equal(await page.locator('#run-prices').isDisabled(), true);
   await next.click();
-  await check.waitFor();
+  await page.getByText('포털에 저장 대기 중인 가격이 있습니다.', {exact: true}).waitFor();
+  assert.deepEqual(posts, [['/api/portal/check', {mode: 'restore'}]]);
+  unsaved = false;
+  await next.click();
+  await page.waitForFunction(() => document.querySelector('#status-message').textContent.includes('001235'));
+  assert.equal(await page.locator('#result-filter').inputValue(), 'ready');
+  assert.equal(await date.inputValue(), '2099-02-03');
+  assert.equal(await hour.inputValue(), '17');
   assert.deepEqual(posts, [
+    ['/api/portal/check', {mode: 'restore'}],
     ['/api/portal/check', {mode: 'restore'}],
     ['/api/portal/stage', {line: 2, mode: 'restore', date: '2099-02-03', hour: '17'}],
   ]);

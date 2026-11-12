@@ -102,8 +102,9 @@ function isLocked() {
   return !state || requestActive || stateNeedsRefresh || state.busy;
 }
 
-function hasUnresolvedInput() {
-  return Object.values(state?.results ?? {}).some(result => result?.status === "pending" || result?.needsReview);
+function hasUnresolvedInput({allowStaged = false} = {}) {
+  return Object.values(state?.results ?? {}).some(result => result?.needsReview ||
+    (result?.status === "pending" && (!allowStaged || !result.offer)));
 }
 
 function hasStagedInput() {
@@ -117,6 +118,7 @@ function refreshControls() {
   const editingPrice = Boolean(priceEdit);
   const unresolved = hasUnresolvedInput();
   const staged = hasStagedInput();
+  const stageBlocked = hasUnresolvedInput({allowStaged: true});
   const haveRows = (state?.plan?.rows.length ?? 0) > 0;
   const restoring = mode === "restore";
   byId("restore-help").hidden = !restoring;
@@ -147,8 +149,11 @@ function refreshControls() {
     input.disabled = locked || editingPrice || !haveRows;
   }
   for (const button of controls.rows.querySelectorAll("button[data-line]")) {
-    button.disabled = locked || edited || editingPrice || unresolved;
-    if (button.dataset.action === "edit-price") {
+    const staging = button.dataset.action === "stage";
+    button.disabled = locked || edited || editingPrice || (staging ? stageBlocked : unresolved);
+    if (staging) {
+      button.title = staged && !stageBlocked ? "이전 포털 입력 상태부터 확인합니다." : "";
+    } else {
       button.title = unresolved ? controls.check.textContent + " 후 수정하세요." : "할인 판매가 수정";
     }
   }
@@ -426,7 +431,8 @@ function renderNotice() {
     message = mode === "restore" ? "복구할 상품의 현재가를 조회하세요." : "할인 적용을 위해 현재가를 조회하세요.";
   }
   if (!state?.busy && hasStagedInput()) {
-    message = [message, "포털에서 저장하거나 입력을 지운 뒤 입력 상태 확인을 눌러 주세요."].filter(Boolean).join(" ");
+    const next = mode === state.mode ? (mode === "restore" ? "다음 상품의 복구가 입력" : "다음 상품의 포털 입력") : "입력 상태 확인";
+    message = [message, "포털에서 저장하거나 입력을 지운 뒤 " + next + "을 눌러 주세요."].filter(Boolean).join(" ");
   }
   if (!isLocked() && isDraftEdited()) message = "목록을 저장한 뒤 현재가를 조회하세요.";
   if (priceEdit) message = priceEdit.originalCode + " 할인 판매가를 편집 중입니다. 확인으로 저장하거나 취소하세요.";
@@ -561,7 +567,7 @@ async function send(path, payload, onSuccess) {
   renderNotice();
   try {
     acceptState(await readState(path, payload));
-    onSuccess?.();
+    await onSuccess?.();
   } catch (error) {
     if (error.connectionFailure) connectionError = error.message;
     else errorMessage = error.message || "요청을 처리하지 못했습니다.";
@@ -697,6 +703,21 @@ function scheduledChange() {
   return {mode, date: controls.date.value, hour: controls.hour.value};
 }
 
+function stageSelectedRow(line) {
+  const payload = {line, ...scheduledChange()};
+  if (!hasStagedInput()) return send("/api/portal/stage", payload);
+
+  const activePlan = planIdentity(state.plan);
+  const selectedResult = JSON.stringify(currentResults()[line]);
+  return send("/api/portal/check", {mode: payload.mode}, async () => {
+    if (state.busy || hasUnresolvedInput() || planIdentity(state.plan) !== activePlan ||
+        JSON.stringify(currentResults()[line]) !== selectedResult) {
+      throw new Error("조회 결과가 바뀌었습니다. 다음 상품을 다시 선택해 주세요.");
+    }
+    acceptState(await readState("/api/portal/stage", payload));
+  });
+}
+
 for (const filter of [controls.search, controls.filter]) {
   filter.addEventListener("input", () => {
     renderRows();
@@ -718,7 +739,7 @@ controls.rows.addEventListener("click", (event) => {
   const line = Number(button.dataset.line);
   if (button.dataset.action === "edit-price") { openPriceEditor(line); return; }
   if (button.dataset.action !== "stage" || !scheduleIsValid()) return;
-  void send("/api/portal/stage", {line, ...scheduledChange()});
+  void stageSelectedRow(line);
 });
 
 controls.hour.append(new Option("시각 선택", ""));
