@@ -434,6 +434,107 @@ async function loginWithRegistrar(page, profileDirectory) {
   }
 }
 
+async function closeLoginNotices(page) {
+  const notices = page.locator('[id*="_loginOpenPopup_"][id$="_titlebar_closebutton"]').filter({ visible: true });
+  const deadline = Date.now() + 35_000;
+  let lastClosed = Date.now();
+  while (Date.now() < deadline) {
+    try {
+      await notices.first().waitFor({ state: 'visible', timeout: 550 });
+    } catch (error) {
+      if (error.name === 'TimeoutError') return;
+      throw error;
+    }
+    const id = await notices.evaluateAll(buttons => buttons.find(button => {
+      const { left, top, width, height } = button.getBoundingClientRect();
+      return button.contains(document.elementFromPoint(left + width / 2, top + height / 2));
+    })?.id);
+    if (!id) {
+      if (Date.now() - lastClosed > 5000) break;
+      await page.waitForTimeout(125);
+      continue;
+    }
+    const button = page.locator('[id=' + JSON.stringify(id) + ']');
+    await button.click({ timeout: 4000 });
+    await button.waitFor({ state: 'hidden', timeout: 4000 });
+    lastClosed = Date.now();
+  }
+  throw screenError('롯데 포털 공지 창을 확인해 주세요.');
+}
+
+async function clickPortalMenu(page, menu) {
+  const deadline = Date.now() + 8000;
+  for (;;) {
+    await closeLoginNotices(page);
+    try {
+      await menu.click({ timeout: 1250 });
+      return;
+    } catch (error) {
+      if (error.name !== 'TimeoutError' || Date.now() >= deadline) throw error;
+    }
+  }
+}
+
+const commonItemSuffix = '_form_div_Work_div_Search_div_itmno';
+
+async function readCommonItem(profileDirectory) {
+  const file = path.join(path.dirname(profileDirectory), 'portal-common-item.json');
+  try {
+    const item = JSON.parse(await readFile(file, 'utf8'));
+    if (typeof item?.code !== 'string' || !/^\d{1,12}$/.test(item.code) ||
+        typeof item.name !== 'string' || !item.name.trim()) {
+      throw screenError('가격변경기의 공통품번 설정을 확인해 주세요.');
+    }
+    return { code: item.code, name: item.name.trim() };
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw screenError('가격변경기의 공통품번 설정을 확인해 주세요.');
+  }
+}
+
+async function selectCommonItem(page, item, hasBlockingDraft) {
+  const code = control(page, commonItemSuffix + '_edt_Code_input');
+  const name = control(page, commonItemSuffix + '_edt_Name_input');
+  const isSelected = async () => (await code.inputValue()).trim() === item.code &&
+    (await name.inputValue()).trim() === item.name;
+  const popup = suffix => page.locator(priceFrame + '[id$="_commPopup_form_' + suffix + '"]').filter({ visible: true });
+  const search = popup('btn_Search');
+  if (!await search.isVisible() && await isSelected()) return;
+  if ((await readDraftGrids(page)).flat().some(hasBlockingDraft)) {
+    throw screenError('입력된 가격을 먼저 확인한 뒤 공통품번을 선택해 주세요.');
+  }
+
+  if (!await search.isVisible()) {
+    const picker = control(page, commonItemSuffix + '_btn_CommPopup');
+    try {
+      await picker.click({ timeout: 1500 });
+    } catch (error) {
+      if (error.name !== 'TimeoutError' || !await search.isVisible()) throw error;
+    }
+  }
+  const query = search.getByText('조회', { exact: true });
+  await query.click();
+
+  const exactName = new RegExp('^\\s*' + item.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$');
+  const nameCell = page.locator(priceFrame + '[id*="_commPopup_form_div_Data_grd_List_body_gridrow_"][id*="_cell_"][id$="_1"]')
+    .filter({ visible: true, hasText: exactName });
+  try {
+    await nameCell.waitFor({ state: 'visible', timeout: 6500 });
+  } catch (error) {
+    if (error.name !== 'TimeoutError' || !await query.isVisible()) throw error;
+    await query.click();
+  }
+  const cellId = await nameCell.getAttribute('id', { timeout: 9000 });
+  const codeCell = page.locator('[id=' + JSON.stringify(cellId.replace(/_1$/, '_0')) + ']');
+  if ((await codeCell.innerText()).trim() !== item.code) {
+    throw screenError('조회 결과에서 설정한 공통품번을 확인하지 못했습니다.');
+  }
+  await nameCell.click();
+  await popup('btn_Confirm').click();
+  await search.waitFor({ state: 'hidden' });
+  if (!await isSelected()) throw screenError('가격관리 화면에 공통품번이 적용됐는지 확인해 주세요.');
+}
+
 export function openPortal(profileDirectory) {
   let context;
   let page;
@@ -454,30 +555,33 @@ export function openPortal(profileDirectory) {
     return page;
   }
 
-  async function ensureSearchScreen(portalPage) {
+  async function ensureSearchScreen(portalPage, { forQuery = true } = {}) {
     const nameInput = control(portalPage, '_form_div_Work_div_Search_edt_prdcNm_input');
     if (await nameInput.count() !== 1) {
-      const onlineMenu = portalPage.locator('[id$="_form_men_TopMenu_6001268"]').filter({ visible: true });
-      if (await onlineMenu.count() !== 1) {
-        throw screenError('포털에 로그인한 뒤 가격관리를 열어 주세요.');
-      }
+      const prices = portalPage.locator('[id$="_div_LeftMenu"]')
+        .getByText('가격관리', { exact: true }).filter({ visible: true });
+      const products = portalPage.locator('[id$="_div_LeftMenu_btn_Left6001278"]')
+        .filter({ visible: true }).last();
       try {
-        await onlineMenu.click();
-        const products = portalPage.locator('[id$="_form_div_LeftMenu_div_LeftMenu_btn_Left6001278"]').filter({ visible: true });
-        await products.waitFor({ state: 'visible', timeout: 8000 });
-        await products.click();
-        const prices = portalPage.locator('[id$="_form_div_LeftMenu"]')
-          .getByText('가격관리', { exact: true }).filter({ visible: true });
-        await prices.waitFor({ state: 'visible', timeout: 8000 });
-        await prices.click();
+        if (!await prices.count()) {
+          if (!await products.count()) {
+            const online = portalPage.locator('[id$="_form_men_TopMenu_6001268"]').filter({ visible: true });
+            await clickPortalMenu(portalPage, online);
+          }
+          await clickPortalMenu(portalPage, products);
+        }
+        await clickPortalMenu(portalPage, prices);
         await nameInput.waitFor({ state: 'visible', timeout: 10000 });
-      } catch {
-        throw screenError('포털에서 온라인 채널연계 → 상품 관리 → 가격관리를 열어 주세요.');
+      } catch (error) {
+        if (error.code === 'PORTAL_SCREEN') throw error;
+        throw screenError('포털에서 온라인 채널연계 → 상품관리 → 가격관리를 열어 주세요.');
       }
     }
-    const productCodeFilter = control(portalPage, '_form_div_Work_div_Search_cbo_prdcCdCl_comboedit_input');
-    if ((await productCodeFilter.inputValue()).trim() !== '-전체-') {
-      throw screenError('포털의 상품코드구분을 -전체-로 선택해 주세요. 조회에는 상품명 칸을 사용합니다.');
+    if (forQuery) {
+      const productCodeFilter = control(portalPage, '_form_div_Work_div_Search_cbo_prdcCdCl_comboedit_input');
+      if ((await productCodeFilter.inputValue()).trim() !== '-전체-') {
+        throw screenError('포털의 상품코드구분을 -전체-로 선택해 주세요. 조회에는 상품명 칸을 사용합니다.');
+      }
     }
     return nameInput;
   }
@@ -643,10 +747,6 @@ export function openPortal(profileDirectory) {
 
   return {
     async open() {
-      if (page && !page.isClosed() && page.url().startsWith(portalOrigin + '/')) {
-        await page.bringToFront();
-        return loginWithRegistrar(page, profileDirectory);
-      }
       if (!context) {
         const { chromium } = await import('playwright');
         const openedContext = await chromium.launchPersistentContext(profileDirectory, {
@@ -660,12 +760,33 @@ export function openPortal(profileDirectory) {
           if (context === openedContext) { context = null; page = null; confirmedSubmission = undefined; }
         });
       }
-      page = context.pages().find(candidate => candidate.url().startsWith(portalOrigin + '/')) ??
-        context.pages().find(candidate => candidate.url() === 'about:blank') ?? await context.newPage();
+      if (!page || page.isClosed() || !page.url().startsWith(portalOrigin + '/')) {
+        page = context.pages().find(candidate => candidate.url().startsWith(portalOrigin + '/')) ??
+          context.pages().find(candidate => candidate.url() === 'about:blank') ?? await context.newPage();
+      }
       page.setDefaultTimeout(5000);
       if (page.url() === 'about:blank') await page.goto(PORTAL_URL, { waitUntil: 'domcontentloaded' });
       await page.bringToFront();
-      return loginWithRegistrar(page, profileDirectory);
+      const login = await loginWithRegistrar(page, profileDirectory);
+      if (login.status !== 'authenticated' && login.status !== 'session') return login;
+      try {
+        await closeLoginNotices(page);
+      } catch {
+        throw screenError('롯데 포털 공지 창을 확인해 주세요.');
+      }
+      await ensureSearchScreen(page, { forQuery: false });
+      await control(page, gridSuffix).waitFor({ state: 'visible' }).catch(() => {
+        throw screenError('포털 가격관리 표가 열렸는지 확인해 주세요.');
+      });
+      const commonItem = await readCommonItem(profileDirectory);
+      if (!commonItem) return { status: 'ready' };
+      try {
+        await selectCommonItem(page, commonItem, hasBlockingDraft);
+      } catch (error) {
+        if (error.code === 'PORTAL_SCREEN') throw error;
+        throw screenError('가격관리 화면이 열렸습니다. 팝업에서 공통품번을 확인해 주세요.');
+      }
+      return { status: 'ready', commonItemName: commonItem.name };
     },
     async ensureSearch() { await ensureSearchScreen(activePage()); },
     async inspect() { return readGrid(activePage()); },

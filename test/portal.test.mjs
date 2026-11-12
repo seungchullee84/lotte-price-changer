@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { chromium } from 'playwright';
 
 const portalFile = new URL('../portal.mjs', import.meta.url);
 const ledgerFile = new URL('../ledger.mjs', import.meta.url).href;
@@ -31,7 +32,7 @@ function snapshotOf(row) {
     headers: { 1: '상품코드', 2: '판매가', 3: '스타일' } };
 }
 
-test('opening the official portal uses the linked registrar settings in the existing browser', async t => {
+test('opening the official portal uses the linked login, closes notices and opens price management', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'price-portal-login-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const registrar = path.join(root, 'registrar fixture');
@@ -41,31 +42,131 @@ test('opening the official portal uses the linked registrar settings in the exis
     'export function createBrowserLoginStore(dataRoot) { return { dataRoot }; }');
   await writeFile(path.join(registrar, 'browser-login.mjs'),
     'export function tryLotteLogin(page, options) { return page.recordLogin(options); }');
+
+  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  t.after(() => browser.close());
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const portalUrl = 'https://together.lotteshopping.com/EMDV3/index.html';
+  const frame = 'mainframe_WorkFrame_OCPIPMOnlnRgstPrdcInqM_2_88';
+  await page.route(portalUrl, route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `
+    <style>.notice { position: fixed; inset: 0; background: white; }</style>
+    <button id="portal_form_men_TopMenu_6001268" hidden>온라인 채널연계</button>
+    <button id="portal_form_div_LeftMenu_div_LeftMenu_btn_Left6001278" hidden>상품관리</button>
+    <div id="undefined_pdv_LeftMenu_div_LeftMenu" hidden>
+      <button id="undefined_pdv_LeftMenu_div_LeftMenu_btn_Left6001278">상품관리</button>
+      <button id="prices" hidden>가격관리</button>
+    </div>
+    <section id="price-screen" hidden>
+      <input id="${frame}_form_div_Work_div_Search_edt_prdcNm_input">
+      <input id="${frame}_form_div_Work_div_Search_cbo_prdcCdCl_comboedit_input" value="사용자 설정">
+      <input id="${frame}_form_div_Work_div_Search_div_itmno_edt_Code_input">
+      <input id="${frame}_form_div_Work_div_Search_div_itmno_edt_Name_input" readonly>
+      <button id="${frame}_form_div_Work_div_Search_div_itmno_btn_CommPopup">공통품번 찾기</button>
+      <div id="${frame}_form_div_Work_div_Data_grd_Master">
+        <span id="grid_head_gridrow_-1_cell_-1_1">상품코드</span>
+        <span id="grid_head_gridrow_-1_cell_-1_2">판매가</span>
+        <span id="grid_head_gridrow_-1_cell_-1_3">스타일</span>
+      </div>
+    </section>
+    <section id="common-item-popup" class="notice" hidden>
+      <input id="${frame}_commPopup_form_div_Search_edt_itmno_input">
+      <button id="${frame}_commPopup_form_btn_Search">조회</button>
+      <div id="common-item-result" hidden>
+        <span id="${frame}_commPopup_form_div_Data_grd_List_body_gridrow_0_cell_0_0">123456</span>
+        <button id="${frame}_commPopup_form_div_Data_grd_List_body_gridrow_0_cell_0_1">기준상품</button>
+      </div>
+      <button id="${frame}_commPopup_form_btn_Confirm" disabled>확인</button>
+    </section>
+    <div class="notice" id="loading" hidden></div>
+    <div class="notice" id="notice-1" hidden>
+      <button id="portal_loginOpenPopup_1_titlebar_closebutton">닫기</button>
+      <button>오늘 하루 그만보기</button>
+    </div>
+    <div class="notice" id="notice-2" hidden>
+      <button id="portal_loginOpenPopup_2_titlebar_closebutton">닫기</button>
+      <button>오늘 하루 그만보기</button>
+    </div>
+    <script>
+      window.actions = [];
+      function click(id, action) {
+        document.getElementById(id).onclick = () => { actions.push(id); action(); };
+      }
+      for (const id of [1, 2]) {
+        click('portal_loginOpenPopup_' + id + '_titlebar_closebutton',
+          () => document.getElementById('notice-' + id).hidden = true);
+      }
+      click('portal_form_men_TopMenu_6001268', () => document.getElementById('undefined_pdv_LeftMenu_div_LeftMenu').hidden = false);
+      click('undefined_pdv_LeftMenu_div_LeftMenu_btn_Left6001278', () => document.getElementById('prices').hidden = false);
+      click('prices', () => document.getElementById('price-screen').hidden = false);
+      click('${frame}_form_div_Work_div_Search_div_itmno_btn_CommPopup',
+        () => document.getElementById('common-item-popup').hidden = false);
+      click('${frame}_commPopup_form_btn_Search', () => document.getElementById('common-item-result').hidden = false);
+      click('${frame}_commPopup_form_div_Data_grd_List_body_gridrow_0_cell_0_1',
+        () => document.getElementById('${frame}_commPopup_form_btn_Confirm').disabled = false);
+      click('${frame}_commPopup_form_btn_Confirm', () => {
+        document.getElementById('${frame}_form_div_Work_div_Search_div_itmno_edt_Code_input').value = '123456';
+        document.getElementById('${frame}_form_div_Work_div_Search_div_itmno_edt_Name_input').value = '기준상품';
+        document.getElementById('common-item-popup').hidden = true;
+      });
+    </script>` }));
+  await page.goto(portalUrl);
+
   const attempts = [];
   let launched = 0;
-  const page = {
-    url: () => 'https://together.lotteshopping.com/EMDV3/index.html',
-    isClosed: () => false, setDefaultTimeout() {}, async bringToFront() {},
-    recordLogin({ store, waitForForm }) {
-      attempts.push({ dataRoot: store.dataRoot, waitForForm });
-      return { status: 'authenticated' };
-    },
+  page.recordLogin = async ({ store, waitForForm }) => {
+    attempts.push({ dataRoot: store.dataRoot, waitForForm });
+    if (attempts.length > 1) return { status: 'session' };
+    await page.evaluate(() => {
+      document.getElementById('portal_form_men_TopMenu_6001268').hidden = false;
+      document.getElementById('loading').hidden = false;
+      setTimeout(() => {
+        document.getElementById('loading').hidden = true;
+        document.getElementById('notice-1').hidden = false;
+        document.getElementById('notice-2').hidden = false;
+      }, 1550);
+    });
+    return { status: 'authenticated' };
   };
   setTestChromium({ async launchPersistentContext(directory) {
     assert.equal(directory, profile);
     launched += 1;
-    return { pages: () => [page], on() {} };
+    return context;
   } });
+
   const portal = openPortal(profile);
   assert.deepEqual(await portal.open(), { status: 'unconfigured' });
   assert.deepEqual(attempts, []);
   await writeFile(path.join(root, 'registrar-login-root.txt'), registrar);
-  assert.deepEqual(await portal.open(), { status: 'authenticated' });
+  assert.deepEqual(await portal.open(), { status: 'ready' });
   assert.deepEqual(attempts, [{ dataRoot: path.join(registrar, 'data'), waitForForm: true }]);
+  const actions = await page.evaluate(() => window.actions);
+  assert.deepEqual(actions, [
+    'portal_loginOpenPopup_2_titlebar_closebutton',
+    'portal_loginOpenPopup_1_titlebar_closebutton',
+    'portal_form_men_TopMenu_6001268',
+    'undefined_pdv_LeftMenu_div_LeftMenu_btn_Left6001278',
+    'prices',
+  ]);
+  assert.equal(await page.locator('#price-screen').isVisible(), true);
+  await assert.rejects(portal.ensureSearch(), /상품코드구분을 -전체-/);
+
+  await writeFile(path.join(root, 'portal-common-item.json'), JSON.stringify({ code: '123456', name: '기준상품' }));
+  assert.deepEqual(await portal.open(), { status: 'ready', commonItemName: '기준상품' });
+  const actionsWithItem = [...actions,
+    frame + '_form_div_Work_div_Search_div_itmno_btn_CommPopup',
+    frame + '_commPopup_form_btn_Search',
+    frame + '_commPopup_form_div_Data_grd_List_body_gridrow_0_cell_0_1',
+    frame + '_commPopup_form_btn_Confirm',
+  ];
+  assert.deepEqual(await page.evaluate(() => window.actions), actionsWithItem);
+  assert.equal(await page.locator('#common-item-popup').isVisible(), false);
+  assert.deepEqual(await portal.open(), { status: 'ready', commonItemName: '기준상품' });
+  assert.deepEqual(await page.evaluate(() => window.actions), actionsWithItem);
   assert.equal(launched, 1);
   await writeFile(path.join(root, 'registrar-login-root.txt'), 'relative-path');
   assert.deepEqual(await portal.open(), { status: 'unavailable' });
-  assert.equal(attempts.length, 1);
+  assert.equal(attempts.length, 3);
 });
 
 test('saved or already-current values do not masquerade as unsaved drafts', () => {

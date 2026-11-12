@@ -13,9 +13,8 @@ const dataDir = process.env.PRICE_CHANGER_DATA || path.join(appDir, 'data');
 const planStore = openPlan(path.join(dataDir, 'price-plan.json'));
 const archiveDir = path.join(dataDir, 'price-plan-history');
 const portal = openPortal(path.join(dataDir, 'chrome-profile'));
-const portalLoginMessages = {
-  authenticated: '롯데 포털 자동 로그인 완료 · 현재가 조회를 눌러 주세요.',
-  session: '롯데 포털 로그인 확인 · 현재가 조회를 눌러 주세요.',
+const portalOpenMessages = {
+  ready: '롯데 포털 가격관리 화면을 열었습니다.',
   unavailable: '상품등록기의 롯데 자동 로그인 설정을 확인하거나 포털에서 직접 로그인해 주세요.',
   manual: '전용 Chrome에서 포털 로그인 화면을 확인해 주세요.',
   expired: '전용 Chrome에서 세션 만료 안내를 확인한 뒤 다시 로그인해 주세요.',
@@ -643,8 +642,9 @@ const server = createServer(async (req, res) => {
     } else if (url.pathname === '/api/portal/open') {
       busy = true;
       try {
-        const login = await portal.open();
-        message = portalLoginMessages[login?.status] ?? 'Chrome에서 로그인한 뒤 현재가를 조회하세요.';
+        const opened = await portal.open();
+        message = portalOpenMessages[opened.status] ?? 'Chrome에서 로그인한 뒤 현재가를 조회하세요.';
+        if (opened.commonItemName) message += ' ' + opened.commonItemName + ' 선택 완료.';
       } finally { busy = false; }
     } else if (url.pathname === '/api/portal/check') {
       if (!plan?.rows.length) throw new Error('먼저 목록을 저장해 주세요.');
