@@ -102,6 +102,7 @@ test('idle polling detects another window starting a job and preserves a local d
 
 test('lost POST response is reconciled by GET and never retries the operation', async t => {
   const state = fixtureState();
+  state.results = {1: {status: 'ready', targetPrice: 44200}};
   let posts = 0;
   const page = await openFixture(t, async route => {
     if (route.request().method() === 'POST') {
@@ -121,8 +122,8 @@ test('lost POST response is reconciled by GET and never retries the operation', 
   state.busy = false;
   state.results = {1: {status: 'saved', message: '포털 저장 확인'}};
   state.message = '저장 확인 1건';
-  await page.waitForFunction(() => !document.querySelector('#run-prices').disabled);
-  assert.match(await page.locator('#work-count').innerText(), /저장 확인 1건/);
+  await page.waitForFunction(() => document.querySelector('#work-count').textContent.includes('저장 확인 1건'));
+  assert.equal(await page.locator('#run-prices').isDisabled(), true);
   assert.equal(await page.locator('#error-message').isVisible(), false);
   assert.equal(posts, 1);
 });
@@ -161,6 +162,7 @@ test('an older in-flight GET cannot overwrite the result of a newer operation', 
 
 test('expired schedules are rejected before POST and corrected schedules can run', async t => {
   const state = fixtureState();
+  state.results = {1: {status: 'ready', targetPrice: 44200}};
   let posts = 0;
   const page = await openFixture(t, async route => {
     if (route.request().method() === 'POST') posts += 1;
@@ -292,12 +294,16 @@ test('restoration shows the original price and sends the exact selected schedule
   assert.equal(await page.getByRole('group', {name: '적용 시작 (한국 시간)'}).isVisible(), true);
   assert.match(await page.locator('#price-rows .target-price').innerText(), /49,800원/);
   assert.equal(requests.length, 0);
+  assert.equal(await page.locator('#run-prices').isDisabled(), true);
+  assert.equal(await page.locator('#check-and-run-prices').isVisible(), false);
   await page.getByRole('button', {name: '현재가 조회', exact: true}).click();
   await page.getByRole('button', {name: /원가격 복구 포털 입력/}).waitFor();
   assert.match(await page.locator('#price-rows tr[data-line="1"]').innerText(), /43,100원/);
+  assert.equal(await page.locator('.price-transition').innerText(), '→ 49,800원');
+  assert.equal(await page.locator('#eligibility-summary').innerText(), '복구 대상 1건');
   await page.locator('#schedule-date').fill('2099-02-03');
   await page.locator('#schedule-hour').selectOption('19');
-  await page.getByRole('button', {name: '복구 대상만 예약', exact: true}).click();
+  await page.getByRole('button', {name: '원가격 복구 예약', exact: true}).click();
   await page.waitForFunction(() => !document.querySelector('#run-prices').disabled);
   assert.deepEqual(requests, [
     {endpoint: '/api/portal/check', payload: {mode: 'restore'}},
@@ -560,7 +566,7 @@ test('a lost price-save response is reconciled without retry or portal execution
   await page.waitForFunction(() => !document.querySelector('#price-edit-dialog').open);
   assert.equal(await page.locator('[data-action="edit-price"]').innerText(), '41,000원');
   assert.equal(await page.locator('#error-message').isVisible(), false);
-  assert.equal(await page.locator('#run-prices').isEnabled(), true);
+  assert.equal(await page.locator('#run-prices').isDisabled(), true);
   assert.deepEqual(mutations, ['/api/plan/price']);
 });
 
@@ -650,4 +656,35 @@ test('unsaved portal input or uncertain saves block price edits and execution un
   assert.equal(await page.locator('#price-edit-dialog').isVisible(), true);
   await page.locator('#price-edit-value').press('Escape');
   assert.deepEqual(mutations, ['/api/portal/check']);
+});
+test('mode can be selected before loading a list and remains selected for price review', async t => {
+  const state = {...fixtureState(), plan: null};
+  const requests = [];
+  const page = await openFixture(t, async route => {
+    if (route.request().method() === 'POST') {
+      const endpoint = new URL(route.request().url()).pathname;
+      const payload = route.request().postDataJSON();
+      requests.push({endpoint, payload});
+      if (endpoint === '/api/import') state.plan = fixtureState().plan;
+      if (endpoint === '/api/portal/check') {
+        state.mode = payload.mode;
+        state.results = {1: {status: 'ready', targetPrice: 49800, offer: {currentPrice: 44200}}};
+      }
+    }
+    await respond(route, state);
+  });
+  const restore = page.locator('input[name="mode"][value="restore"]');
+  await page.waitForFunction(() => !document.querySelector('input[value="restore"]').disabled);
+  await restore.check();
+  assert.equal(await page.locator('#check-prices').isDisabled(), true);
+  await page.locator('#source-text').fill(fixtureState().plan.sourceText);
+  await page.locator('#save-plan').click();
+  await page.waitForFunction(() => !document.querySelector('#check-prices').disabled);
+  assert.equal(await restore.isChecked(), true);
+  assert.equal(await page.locator('#run-prices').isDisabled(), true);
+  await page.locator('#check-prices').click();
+  await page.waitForFunction(() => !document.querySelector('#run-prices').disabled);
+  assert.equal(await page.locator('#run-prices').textContent(), '원가격 복구 예약');
+  assert.deepEqual(requests.map(({endpoint}) => endpoint), ['/api/import', '/api/portal/check']);
+  assert.deepEqual(requests[1].payload, {mode: 'restore'});
 });

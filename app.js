@@ -119,10 +119,13 @@ function refreshControls() {
   const unresolved = hasUnresolvedInput();
   const staged = hasStagedInput();
   const stageBlocked = hasUnresolvedInput({allowStaged: true});
-  const haveRows = (state?.plan?.rows.length ?? 0) > 0;
+  const rows = state?.plan?.rows ?? [];
+  const haveRows = rows.length > 0;
+  const results = currentResults();
+  const ready = rows.filter(row => resultForRow(row, results)?.status === "ready").length;
   const restoring = mode === "restore";
-  controls.run.textContent = restoring ? "복구 대상만 예약" : "변경 대상만 적용";
-  controls.checkAndRun.textContent = restoring ? "조회 후 복구 예약" : "조회 후 바로 적용";
+  controls.run.textContent = restoring ? "원가격 복구 예약" : "할인가 예약";
+  controls.checkAndRun.textContent = restoring ? "조회 후 원가격 복구 예약" : "조회 후 할인가 예약";
   controls.portal.disabled = locked || editingPrice;
   controls.source.disabled = locked || editingPrice;
   controls.file.disabled = locked || editingPrice;
@@ -139,13 +142,18 @@ function refreshControls() {
   else controls.downloadHistory.removeAttribute("href");
   controls.check.textContent = staged ? "입력 상태 확인" : "현재가 조회";
   controls.check.disabled = locked || edited || editingPrice || !haveRows;
-  controls.run.disabled = controls.check.disabled || unresolved;
+  controls.run.disabled = controls.check.disabled || unresolved || !ready;
+  const eligibility = byId("eligibility-summary");
+  const detail = edited ? "목록 저장 후 조회하세요." : !haveRows ? "상품 목록을 먼저 준비하세요."
+    : staged ? "포털에서 입력 상태 확인이 필요합니다." : !Object.keys(results).length ? "현재가를 조회하면 예약 대상을 확인할 수 있어요."
+    : (restoring ? "복구 대상 " : "할인가 적용 대상 ") + moneyFormat.format(ready) + "건";
+  if (eligibility.textContent !== detail) eligibility.textContent = detail;
   controls.checkAndRun.disabled = controls.check.disabled || unresolved;
   controls.date.disabled = locked || editingPrice || !haveRows;
   controls.hour.disabled = locked || editingPrice || !haveRows;
   for (const input of controls.modes) {
     input.checked = input.value === mode;
-    input.disabled = locked || editingPrice || !haveRows;
+    input.disabled = locked || editingPrice;
   }
   for (const button of controls.rows.querySelectorAll("button[data-line]")) {
     const staging = button.dataset.action === "stage";
@@ -220,6 +228,9 @@ function makeRow(row, result) {
   const observedPrices = [...new Set(candidateOffers(result).map(offer => offer.currentPrice).filter(Number.isSafeInteger))];
   const observedLabel = observedPrices.map(priceLabel).join(" / ") || "—";
   const observedPrice = element("td", observedLabel, "money observed-price");
+  if (result?.status === "ready" && observedPrices.length && Number.isSafeInteger(result.targetPrice)) {
+    observedPrice.append(element("span", "→ " + priceLabel(result.targetPrice), "price-transition"));
+  }
   for (const [cell, title] of [[originalPrice, "원가격"], [discountPrice, "할인 판매가"], [observedPrice, "포털 현재가"]]) {
     const label = element("span", title, "price-cell-label");
     label.setAttribute("aria-hidden", "true");
@@ -645,18 +656,26 @@ controls.discard.addEventListener("click", () => {
   render();
 });
 
+function loadPlan(path, payload) {
+  const selectedMode = mode;
+  return send(path, payload, () => {
+    resetPlanEditor();
+    mode = selectedMode;
+  });
+}
+
 controls.importForm.addEventListener("submit", (event) => {
   event.preventDefault();
   if (controls.save.disabled) return;
   const payload = {sourceText: controls.source.value};
   if (selectedFileName) payload.sourceName = selectedFileName;
-  void send("/api/import", payload, resetPlanEditor);
+  void loadPlan("/api/import", payload);
 });
 
 controls.historySelect.addEventListener("change", refreshControls);
 controls.loadHistory.addEventListener("click", () => {
   if (controls.loadHistory.disabled) return;
-  void send("/api/history/load", {id: controls.historySelect.value}, resetPlanEditor);
+  void loadPlan("/api/history/load", {id: controls.historySelect.value});
 });
 
 for (const input of controls.modes) {

@@ -14,10 +14,21 @@
   </header>
 
   <main>
+    <section class="workflow-step" aria-labelledby="mode-heading">
+      <h2 id="mode-heading" class="step-heading"><span>1</span> 작업 선택</h2>
+        <fieldset id="mode-controls">
+          <legend class="sr-only">작업 모드</legend>
+          <div class="segmented">
+            <label><input type="radio" name="mode" value="discount" checked disabled><span>할인가 적용</span></label>
+            <label><input type="radio" name="mode" value="restore" disabled><span>원가격 복구</span></label>
+          </div>
+        </fieldset>
+    </section>
+
     <section class="list-management" aria-labelledby="import-heading">
       <details id="import-details" open>
         <summary>
-          <span id="import-heading">목록 관리</span>
+          <span id="import-heading" class="step-heading"><span>2</span> 상품 목록</span>
           <span id="plan-summary" class="muted"></span>
         </summary>
         <form id="import-form" class="import-form">
@@ -52,15 +63,13 @@
     </section>
 
     <section aria-labelledby="work-heading">
-      <h2 id="work-heading" class="sr-only">가격 목록</h2>
-      <div class="work-controls">
-        <fieldset id="mode-controls">
-          <legend class="sr-only">작업 모드</legend>
-          <div class="segmented">
-            <label><input type="radio" name="mode" value="discount" checked disabled><span>할인 적용</span></label>
-            <label><input type="radio" name="mode" value="restore" disabled><span>원가격 복구</span></label>
-          </div>
-        </fieldset>
+      <div class="workflow-step">
+        <h2 id="work-heading" class="step-heading"><span>3</span> 현재가 확인</h2>
+        <button id="check-prices" class="button button-primary" type="button" disabled>현재가 조회</button>
+        <p id="eligibility-summary" class="muted" aria-live="polite"></p>
+      </div>
+      <section class="workflow-step schedule-step" aria-labelledby="schedule-heading">
+        <h2 id="schedule-heading" class="step-heading"><span>4</span> 적용 예약</h2>
         <fieldset id="schedule-controls">
           <legend class="sr-only">적용 시작 (한국 시간)</legend>
           <div class="date-controls">
@@ -71,19 +80,19 @@
             <select id="schedule-hour" required disabled></select>
           </div>
         </fieldset>
-        <div class="work-actions">
-          <button id="check-prices" class="button button-primary" type="button" disabled>현재가 조회</button>
-          <button id="run-prices" class="button button-outline" type="button" title="선택한 시각에 정상마진 34로 포털에 저장합니다." disabled>변경 대상만 적용</button>
-          <button id="check-and-run-prices" class="button button-quiet" type="button" title="현재가 조회 후 정상마진 34로 포털에 저장합니다." disabled>조회 후 바로 적용</button>
-        </div>
-      </div>
+        <button id="run-prices" class="button button-primary" type="button" disabled>할인가 예약</button>
+        <details class="quick-action">
+          <summary>빠른 예약</summary>
+          <button id="check-and-run-prices" class="button button-outline" type="button" title="현재가 조회 후 정상마진 34로 포털에 저장합니다." disabled>조회 후 할인가 예약</button>
+        </details>
+      </section>
       <div class="notices">
         <p id="status-message" class="notice" role="status">저장된 목록을 확인하고 있습니다.</p>
         <p id="error-message" class="notice notice-error" role="alert" hidden></p>
         <p id="startup-warnings" class="notice notice-warning" role="status" hidden></p>
       </div>
 
-      <div id="empty-state" class="empty-state" hidden>목록 관리에서 TXT·엑셀을 열거나 가격 목록을 붙여넣으세요.</div>
+      <div id="empty-state" class="empty-state" hidden>상품 목록에서 TXT·엑셀을 열거나 가격 목록을 붙여넣으세요.</div>
       <div id="list-view" hidden>
         <div id="result-groups" class="result-groups" role="group" aria-label="조회 결과 분류"></div>
         <div class="list-tools">
