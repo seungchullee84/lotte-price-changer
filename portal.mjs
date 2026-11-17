@@ -755,7 +755,7 @@ export function openPortal(profileDirectory) {
       if (!context) {
         const { chromium } = await import('playwright');
         const openedContext = await chromium.launchPersistentContext(profileDirectory, {
-          channel: 'chrome',
+          channel: process.env.PRICE_CHANGER_BUNDLED_BROWSER === '1' ? undefined : 'chrome',
           headless: false,
           viewport: null,
           args: ['--restore-last-session'],

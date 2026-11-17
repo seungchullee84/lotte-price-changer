@@ -28,7 +28,7 @@ try {
 }
 const token = (await readFile(tokenFile, 'utf8')).trim();
 if (!/^[a-f0-9]{48}$/.test(token)) throw new Error('가격 변경기 접속 키 파일을 확인해 주세요.');
-const port = Number(process.env.PRICE_CHANGER_PORT || 49428);
+let port = Number(process.env.PRICE_CHANGER_PORT || 49428);
 const startupWarnings = [];
 async function logError(context, error) {
   const entry = { at: new Date().toISOString(), context, code: error.code, message: error.message };
@@ -723,6 +723,7 @@ server.on('error', error => {
 });
 
 server.listen(port, '127.0.0.1', () => {
+  port = server.address().port;
   console.log('가격 변경기 실행 중 · 이 창을 닫으면 종료됩니다.');
   void openWindow().catch(error => logError('open-window', error));
 });
